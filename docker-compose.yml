@@ -1,0 +1,28 @@
+services:
+  simulator:
+    build:
+      context: .
+      args:
+        # Broker client libraries to bake into the image (space separated), e.g. "paho-mqtt kafka-python"
+        EXTRAS: ${SIM_EXTRAS:-paho-mqtt}
+    image: industrial-sim:latest
+    ports:
+      - "${SIM_PUBLISH_PORT:-8000}:8000"
+    environment:
+      SIM_SCENARIO: ${SIM_SCENARIO:-scenario_a_basic_line}
+    volumes:
+      - sim-data:/data
+    restart: unless-stopped
+
+  # Optional MQTT broker: `docker compose --profile mqtt up`.
+  # Then enable integration with {"adapter": "mqtt", "options": {"host": "mosquitto", "port": 1883}}.
+  mosquitto:
+    image: eclipse-mosquitto:2
+    profiles: ["mqtt"]
+    command: ["mosquitto", "-c", "/mosquitto-no-auth.conf"]
+    ports:
+      - "1883:1883"
+    restart: unless-stopped
+
+volumes:
+  sim-data:

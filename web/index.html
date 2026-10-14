@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Industrial Digital Twin Simulator</title>
+  <link rel="stylesheet" href="/static/style.css?v=6">
+</head>
+<body>
+<header id="toolbar">
+  <strong class="brand">Digital Twin Simulator</strong>
+  <span class="group">
+    <select id="scenario-select" title="Built-in scenarios"></select>
+    <button id="btn-load-scenario">Load</button>
+    <button id="btn-new" title="Empty plant, keep catalog">New</button>
+    <button id="btn-export">Export JSON</button>
+    <label class="file-btn">Import JSON<input type="file" id="file-import" accept=".json" hidden></label>
+  </span>
+  <span class="group">
+    <button id="btn-start" class="primary">Start</button>
+    <button id="btn-pause">Pause</button>
+    <button id="btn-resume">Resume</button>
+    <button id="btn-stop">Stop</button>
+    <button id="btn-reset">Reset</button>
+    <input id="step-seconds" type="number" value="10" min="0.1" step="any" title="Step seconds">
+    <button id="btn-step">Step</button>
+  </span>
+  <span class="group">
+    Speed ×
+    <select id="accel">
+      <option>0.5</option><option selected>1</option><option>2</option><option>5</option><option>10</option>
+      <option>50</option><option>100</option><option>1000</option>
+    </select>
+  </span>
+  <span class="group">
+    <input id="ckpt-name" value="checkpoint1" size="10" title="Checkpoint name">
+    <button id="btn-ckpt-save">Save ckpt</button>
+    <button id="btn-ckpt-restore">Restore ckpt</button>
+  </span>
+  <span id="clock" class="clock">idle · t=0.0s</span>
+</header>
+<main>
+  <aside id="palette">
+    <h3>Add asset</h3>
+    <button data-kind="producer">Producer</button>
+    <button data-kind="transformer">Transformer</button>
+    <button data-kind="splitter">Splitter</button>
+    <button data-kind="sink">Sink</button>
+    <p class="hint">Drag assets to move. Click an <b>output port</b> (right) then an <b>input port</b> (left) to
+      create a conveyor. Select + <kbd>Del</kbd> to remove. Drag background to pan, wheel to zoom, double-click to fit.</p>
+    <h3>Metrics</h3>
+    <pre id="metrics"></pre>
+    <h3>Validation</h3>
+    <pre id="validation"></pre>
+  </aside>
+  <section id="canvas-wrap">
+    <canvas id="canvas"></canvas>
+    <div id="toast"></div>
+  </section>
+  <aside id="side">
+    <nav class="tabs">
+      <button data-tab="inspector" class="active">Inspector</button>
+      <button data-tab="events">Events</button>
+      <button data-tab="products">Products</button>
+      <button data-tab="catalog">Catalog</button>
+      <button data-tab="integration">Integration</button>
+    </nav>
+    <div id="tab-inspector" class="tab active"><p class="hint">Select an asset on the canvas.</p></div>
+    <div id="tab-events" class="tab">
+      <div class="row"><input id="ev-filter" placeholder="filter asset id / event type"></div>
+      <div id="event-log" class="log"></div>
+    </div>
+    <div id="tab-products" class="tab">
+      <div class="row">
+        <select id="pf-status"><option value="">any status</option><option>queued</option><option>in_transit</option>
+          <option>reserved</option><option>consumed</option><option>completed</option><option>stored</option></select>
+        <input id="pf-type" placeholder="type id" size="8">
+        <select id="pf-defective"><option value="">any</option><option value="true">defective</option>
+          <option value="false">good</option></select>
+        <button id="pf-search">Search</button>
+      </div>
+      <div class="row"><input id="pf-id" placeholder="product id (PRD-…)"><button id="pf-open">Open DPP</button></div>
+      <div id="product-list" class="log"></div>
+    </div>
+    <div id="tab-catalog" class="tab">
+      <div class="cat-head"><h4>Product types</h4><button class="small primary" data-new="type">+ New type</button></div>
+      <div id="types-list"></div>
+      <div class="cat-head"><h4>Recipes</h4><button class="small primary" data-new="recipe">+ New recipe</button></div>
+      <div id="recipes-list"></div>
+      <div class="cat-head"><h4>Production orders</h4><button class="small primary" data-new="order">+ New order</button></div>
+      <div id="orders-list"></div>
+    </div>
+    <div id="tab-integration" class="tab">
+      <p class="hint">Publish machine/product/config events and metrics to a broker. The in-memory adapter
+        needs no external service; Kafka/MQTT/Pulsar require their Python client libraries and a running broker.</p>
+      <div class="form">
+        <div class="f"><label class="lbl">Adapter</label><div class="fbody">
+          <select id="int-adapter"><option value="none">Disabled</option><option value="memory">In-memory (testing)</option>
+            <option value="mqtt">MQTT</option><option value="kafka">Kafka</option><option value="pulsar">Pulsar</option></select></div></div>
+      </div>
+      <div id="int-options"></div>
+      <div id="int-common" class="form">
+        <div class="f"><label class="lbl">Topic prefix</label><div class="fbody"><input id="int-prefix" value="industrial-sim"></div></div>
+        <div class="f"><label class="lbl">Publish</label><div class="fbody checks" id="int-cats">
+          <label class="check"><input type="checkbox" value="machine" checked>machine</label>
+          <label class="check"><input type="checkbox" value="product" checked>product</label>
+          <label class="check"><input type="checkbox" value="config" checked>config</label>
+          <label class="check"><input type="checkbox" value="metrics" checked>metrics</label></div></div>
+      </div>
+      <div class="row"><button id="btn-int-apply" class="primary">Apply</button></div>
+      <h4>Status</h4>
+      <div id="int-info" class="log"></div>
+      <button id="btn-int-msgs">Show last messages</button>
+      <pre id="int-msgs" class="log"></pre>
+    </div>
+  </aside>
+</main>
+<div id="modal" class="hidden">
+  <div class="modal-body">
+    <button id="modal-close" class="close">×</button>
+    <div id="modal-content"></div>
+  </div>
+</div>
+<script src="/static/forms.js?v=6"></script>
+<script src="/static/app.js?v=6"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+# testing
+pytest>=8
+httpx>=0.27
+# optional broker adapters (install only what you need)
+# kafka-python>=2.0
+# paho-mqtt>=1.6
+# pulsar-client>=3.4
