@@ -438,6 +438,14 @@ $("#btn-load-scenario").onclick = () => act(async () => {
   await api("POST", `/api/scenarios/${encodeURIComponent($("#scenario-select").value)}/load`);
   eventBuffer = []; lastEventSeq = 0; select(null); needsFit = true;
 }, "Scenario loaded");
+$("#btn-new").onclick = () => {
+  if (!confirm("Start an empty plant? The current network is discarded (catalog is kept). Export first if you need it.")) return;
+  act(async () => {
+    const data = await api("GET", "/api/scenario");
+    await api("POST", "/api/scenario", { ...data, name: "Untitled plant", assets: [] });
+    eventBuffer = []; lastEventSeq = 0; select(null); needsFit = true; userView = false; view = { ox: 0, oy: 0, s: 1 };
+  }, "Empty plant created: add assets from the palette");
+};
 $("#btn-export").onclick = async () => {
   const data = await api("GET", "/api/scenario");
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
