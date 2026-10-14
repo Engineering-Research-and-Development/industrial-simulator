@@ -20,7 +20,7 @@ from ..errors import ValidationError
 from ..models import Location, Product, ProductStatus
 from .base import BLOCKED, IDLE, RUNNING, Asset, parse_initial_state
 
-SINK_PORTS = ("in0", "in1", "in2", "in3")
+SINK_PORTS = ("in0",)
 
 
 class Sink(Asset):

@@ -64,9 +64,11 @@ docker run -p 8000:8000 -v sim-data:/data industrial-sim
 | Add an asset | Left palette (producer, transformer, splitter, sink) opens a form dialog with name, settings and a live preview (throughput, cycle time, quality) |
 | Connect | Click an **output port** (right side), then an **input port** (left side). This creates a conveyor |
 | Move / delete | Drag a node. Select it and press **Del** |
+| Copy / paste | Select a machine and press **Ctrl+C**, then **Ctrl+V** (or **Ctrl+D** / **Duplicate** in the inspector). The copy keeps the full configuration; connections are not copied |
+| Ports | Transformers show one input/output port per recipe slot, labelled with quantity and product type (e.g. `10× Iron billet`). Sinks have a single input |
 | Pan / zoom / fit | Drag the background / mouse wheel / double-click the background |
 | Inspect | Click an asset to see its state, commands (start/stop/fault/restart), a form-based config editor per asset kind (dropdowns, sliders, rule and attribute rows, live preview; **Apply changes** sends only the changed fields as a versioned change; a raw-JSON fallback is under *Advanced*), statistics, operational history, config changes, and products received (sinks) |
-| Products / DPP | **Products** tab → search → click a product to see its passport (identity, provenance, lineage tree, full history with inherited entries in italics) |
+| Products / DPP | **Products** tab → search → click a product to see its passport (identity, provenance, lineage tree, history: inherited entries from the same batch or cycle are merged into one step with a product count, and attributes are shown as chips) |
 | Catalog | Cards for product types, recipes and production orders with **+ New**, **Edit** and **Delete**. Recipes are built visually: input/output rows (type, quantity, by-product), processing time, defect policy, parameters |
 | Integration | Choose an adapter and fill in its connection fields (host/port/QoS, bootstrap servers, service URL), topic prefix and event categories; inspect published messages (in-memory adapter) |
 | Save state | **Export JSON** / **Import JSON** (scenario definition); **Save ckpt** / **Restore ckpt** (full runtime state) |

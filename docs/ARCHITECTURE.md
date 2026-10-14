@@ -56,18 +56,21 @@ through listeners (`sim.listeners`, called with `(channel, payload)`) or queries
 * **Conveyor**: FIFO. It holds `floor(length_m × capacity_per_m)` items and the transit time is
   `length_m / speed_m_s`. An item that reaches the end while the downstream input is full stays on the belt,
   and the conveyor is *blocked* (back-pressure). Positions shown in the UI are interpolated from entry time.
-* **Transformer**: runs a recipe with 1–5 inputs and 1–3 outputs (products or by-products) on fixed ports.
+* **Transformer**: runs a recipe with 1–5 inputs and 1–3 outputs (products or by-products) on fixed ports. Only the ports used by the
+  current recipe are exposed (`in0..`, `out0..`, labelled with quantity and product type).
   It starts a cycle when every input buffer has the required quantities and all output buffers have room.
   * Processing time is `recipe.processing_time_s × speed_multiplier(speed_pct)`.
   * Quality is `quality(speed_pct)`, and the defect probability is `1 − quality`.
-  * `defect_policy` is either `independent` (each output is drawn separately) or `any_defective_input`
-    (outputs are also defective if any consumed input was defective).
+  * `defect_policy` is either `any_defective_input` (default: defects cascade, so outputs are defective if any
+    consumed input was defective, otherwise drawn from machine quality) or `independent` (each output is drawn from
+    machine quality only, ignoring input defects). Output history records `defect_cause`
+    (`defective_input` / `machine_quality`).
   * At cycle start, the inputs become *reserved*. At completion they become *consumed*, and outputs are
     created with the inputs as parents.
 * **Splitter**: has a percentage mode (deterministic; each product goes to the branch furthest below
   its target share, so deviation stays under one product) or a conditional mode (ordered rules, then a
   fallback branch). It has a small buffer.
-* **Sink**: accepts some or all product types, up to an optional capacity. Products that meet the
+* **Sink**: has a single input port (`in0`). It accepts some or all product types, up to an optional capacity. Products that meet the
   completion criteria become *completed*; the others become *stored*. It keeps statistics by type, lot,
   order, origin cycle and defectiveness.
 

@@ -360,8 +360,8 @@ const CATALOG = {
     { key: "inputs", label: "Consumes", type: "recipeItems", max: 5, addLabel: "+ Add input", help: "Up to 5 inputs (one input port each)" },
     { key: "outputs", label: "Produces", type: "recipeItems", max: 3, byproduct: true, addLabel: "+ Add output", help: "Up to 3 outputs (one output port each)" },
     { key: "processing_time_s", label: "Processing time", type: "number", min: 0, suffix: "s (base, × speed factor)" },
-    { key: "defect_policy", label: "Defects", type: "select", options: [["independent", "From machine quality only"],
-      ["any_defective_input", "Also defective if any input is defective"]] },
+    { key: "defect_policy", label: "Defects", type: "select", options: [["any_defective_input", "Cascade: defective if any input is defective"],
+      ["independent", "Machine quality only (ignore input defects)"]] },
     { key: "description", label: "Description", type: "text", multiline: true },
     { key: "parameters", label: "Parameters", type: "kv", addLabel: "+ Add parameter" }] },
   order: { title: "production order", path: "/api/orders", fields: (editing) => [
@@ -397,7 +397,7 @@ async function openCatalogDialog(kind, existing) {
   const ctx = await loadCtx();
   if (kind === "recipe" && !ctx.types.length) return toast("Create a product type first");
   const editing = !!existing;
-  const value = existing || (kind === "recipe" ? { inputs: [], outputs: [], processing_time_s: 10, defect_policy: "independent" } : {});
+  const value = existing || (kind === "recipe" ? { inputs: [], outputs: [], processing_time_s: 10, defect_policy: "any_defective_input" } : {});
   openFormDialog({
     title: `${editing ? "Edit" : "New"} ${spec.title}`, fields: spec.fields(editing), value, ctx,
     preview: kind === "recipe" ? (v, c) => `${esc(itemsText(c, v.inputs))} → ${esc(itemsText(c, v.outputs))}` : null,

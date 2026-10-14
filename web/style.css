@@ -115,3 +115,10 @@ input[readonly] { opacity: .6; }
 .flow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 3px 0; }
 .flow .arrow { color: #f0a640; font-weight: bold; }
 .chip { display: inline-block; background: #333a45; border-radius: 8px; padding: 0 6px; font-size: 11px; margin: 2px 2px 0 0; }
+
+/* passport history chips */
+.hist td.chips { line-height: 1.9; }
+.chip { display: inline-block; background: #2a2f37; border-radius: 4px; padding: 0 6px; margin: 0 4px 2px 0; font-size: 11px; white-space: nowrap; font-style: normal; }
+.chip b { color: #8b93a1; font-weight: normal; }
+.chip.bad { background: #5c2323; color: #ffb3b3; }
+.hist details summary { cursor: pointer; }

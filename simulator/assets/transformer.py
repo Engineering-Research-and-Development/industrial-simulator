@@ -88,6 +88,22 @@ class Transformer(Asset):
         return "next cycle"
 
     # ------------------------------------------------------------------ connections & config
+    def port_info(self) -> dict:
+        """Expose only the ports the recipe uses (plus any still connected), labelled by product type."""
+        r = self.recipe
+        n_in, n_out = (len(r.inputs), len(r.outputs)) if r else (1, 1)
+        ins = [p for i, p in enumerate(IN_PORTS) if i < n_in or p in self.inputs]
+        outs = [p for j, p in enumerate(OUT_PORTS) if j < n_out or p in self.outputs]
+        labels: dict[str, str] = {}
+        if r:
+            def label(item) -> str:
+                pt = self.sim.product_types.get(item.product_type_id)
+                name = pt.name if pt else item.product_type_id
+                return f"{item.quantity}× {name}" + (" (by-product)" if item.is_byproduct else "")
+            labels.update({IN_PORTS[i]: label(it) for i, it in enumerate(r.inputs)})
+            labels.update({OUT_PORTS[j]: label(it) for j, it in enumerate(r.outputs)})
+        return {"inputs": ins, "outputs": outs, "labels": labels}
+
     def validate_input_connection(self, port: str) -> None:
         super().validate_input_connection(port)
         r = self.recipe
@@ -270,9 +286,10 @@ class Transformer(Asset):
         for j, item in enumerate(recipe.outputs):
             for _ in range(item.quantity):
                 if recipe.defect_policy == "any_defective_input" and any_defective_input:
-                    defective = True
+                    defective, cause = True, "defective_input"
                 else:
                     defective = sim.rng.random() < p_defect
+                    cause = "machine_quality" if defective else None
                 defects += int(defective)
                 prod = sim.create_product(
                     type_id=item.product_type_id, lot=cycle.lot_number, order_ids=list(cycle.production_order_ids),
@@ -286,6 +303,7 @@ class Transformer(Asset):
                     attributes={"recipe_id": recipe.id, "transformer_speed": snap["speed_pct"] / 100.0,
                                 "time_multiplier": snap["time_multiplier"], "quality_score": quality,
                                 "defect_probability": p_defect, "is_defective": defective,
+                                "defect_cause": cause, "defect_policy": recipe.defect_policy,
                                 "output_slot": j, "is_byproduct": item.is_byproduct,
                                 "input_defect_states": {p.id: p.is_defective for p in inputs},
                                 "readings": self._readings(snap["speed_pct"]),

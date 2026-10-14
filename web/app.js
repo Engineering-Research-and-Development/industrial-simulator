@@ -46,6 +46,7 @@ const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 const fmt = (t) => (t === null || t === undefined ? "–" : Number(t).toFixed(1));
 
 // ------------------------------------------------------------------ geometry
+const nodeH = (a) => Math.max(H, 18 * (Math.max(a.ports?.inputs?.length || 0, a.ports?.outputs?.length || 0) + 1));
 const assetsById = () => Object.fromEntries((state?.assets || []).map((a) => [a.id, a]));
 const nodes = () => (state?.assets || []).filter((a) => a.kind !== "conveyor");
 const conveyors = () => (state?.assets || []).filter((a) => a.kind === "conveyor");
@@ -53,7 +54,7 @@ const conveyors = () => (state?.assets || []).filter((a) => a.kind === "conveyor
 function portPos(asset, port, dir) {
   const list = dir === "in" ? asset.ports.inputs : asset.ports.outputs;
   const i = Math.max(0, list.indexOf(port));
-  const y = asset.position.y + (H * (i + 1)) / (list.length + 1);
+  const y = asset.position.y + (nodeH(asset) * (i + 1)) / (list.length + 1);
   return { x: asset.position.x + (dir === "in" ? 0 : W), y };
 }
 function hitPort(x, y) {
@@ -71,7 +72,7 @@ function hitNode(x, y) {
   const ns = nodes();
   for (let i = ns.length - 1; i >= 0; i--) {
     const a = ns[i];
-    if (x >= a.position.x && x <= a.position.x + W && y >= a.position.y && y <= a.position.y + H) return a;
+    if (x >= a.position.x && x <= a.position.x + W && y >= a.position.y && y <= a.position.y + nodeH(a)) return a;
   }
   return null;
 }
@@ -140,7 +141,7 @@ function draw() {
     ctx.fillStyle = KIND_COLORS[a.kind] || "#333";
     ctx.strokeStyle = a.id === selectedId ? "#f0a640" : STATE_COLORS[a.state] || "#777";
     ctx.lineWidth = a.id === selectedId ? 3 : 2;
-    ctx.beginPath(); ctx.roundRect(x, y, W, H, 6); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.roundRect(x, y, W, nodeH(a), 6); ctx.fill(); ctx.stroke();
     ctx.fillStyle = "#fff"; ctx.textAlign = "left"; ctx.font = "bold 12px system-ui";
     ctx.fillText(a.name.slice(0, 22), x + 8, y + 16);
     ctx.font = "11px system-ui"; ctx.fillStyle = "#cfd6df";
@@ -158,7 +159,7 @@ function draw() {
         ctx.strokeStyle = pendingPort && pendingPort.asset_id === a.id && pendingPort.port === p ? "#f0a640" : "#9fd3ff";
         ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(pp.x, pp.y, PORT_R, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
         ctx.fillStyle = "#8b93a1"; ctx.font = "9px system-ui"; ctx.textAlign = dir === "in" ? "right" : "left";
-        ctx.fillText(p, pp.x + (dir === "in" ? -8 : 8), pp.y - 7);
+        ctx.fillText(a.ports.labels?.[p] || p, pp.x + (dir === "in" ? -8 : 8), pp.y - 7);
       }
     }
   }
@@ -181,7 +182,7 @@ function fitView() {
   const ns = nodes(); if (!ns.length) return;
   const r = canvas.getBoundingClientRect(), pad = 50;
   const minX = Math.min(...ns.map((a) => a.position.x)), minY = Math.min(...ns.map((a) => a.position.y));
-  const maxX = Math.max(...ns.map((a) => a.position.x + W)), maxY = Math.max(...ns.map((a) => a.position.y + H));
+  const maxX = Math.max(...ns.map((a) => a.position.x + W)), maxY = Math.max(...ns.map((a) => a.position.y + nodeH(a)));
   const s = Math.min(1.5, (r.width - 2 * pad) / Math.max(1, maxX - minX), (r.height - 2 * pad) / Math.max(1, maxY - minY));
   view = { s, ox: pad - minX * s + (r.width - 2 * pad - (maxX - minX) * s) / 2, oy: pad - minY * s + (r.height - 2 * pad - (maxY - minY) * s) / 2 };
 }
@@ -225,8 +226,32 @@ window.addEventListener("mouseup", () => {
   }
   drag = null; pan = null;
 });
+// ------------------------------------------------------------------ copy / paste
+let clipboard = null, pasteCount = 0;
+function copyAsset(id) {
+  const a = assetsById()[id];
+  if (!a || a.kind === "conveyor") return toast("Select a machine (not a conveyor) to copy");
+  clipboard = { kind: a.kind, name: a.name, config: structuredClone(a.config), position: { ...a.position }, height: nodeH(a) };
+  pasteCount = 0;
+  toast(`Copied ${a.name}`, true);
+}
+async function pasteAsset() {
+  if (!clipboard) return toast("Nothing to copy-paste yet: select an asset and press Ctrl+C");
+  pasteCount++;
+  const { kind, name, config, position } = clipboard;
+  const pos = { x: position.x + 30 * pasteCount, y: position.y + (clipboard.height + 24) * pasteCount };
+  const r = await act(() => api("POST", "/api/assets", { kind, name: `${name} (copy)`, config, position: pos }), "Pasted");
+  if (r && r.id) select(r.id);
+}
+const typing = () => ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
 window.addEventListener("keydown", (ev) => {
   if (ev.key === "Escape") pendingPort = null;
+  if ((ev.ctrlKey || ev.metaKey) && !typing() && !String(window.getSelection())) {
+    const k = ev.key.toLowerCase();
+    if (k === "c" && selectedId) { ev.preventDefault(); copyAsset(selectedId); }
+    else if (k === "v") { ev.preventDefault(); pasteAsset(); }
+    else if (k === "d" && selectedId) { ev.preventDefault(); copyAsset(selectedId); pasteAsset(); }
+  }
   if (ev.key === "Delete" && selectedId && !["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName)) {
     if (confirm(`Delete ${selectedId}?`)) {
       const id = selectedId; select(null);
@@ -270,6 +295,7 @@ async function renderInspector(force = false) {
       <button data-cmd="start">Start</button><button data-cmd="stop">Stop</button>
       <button data-cmd="fault">Inject fault</button><button data-cmd="restart">Restart</button>
     </div>
+    ${a.kind !== "conveyor" ? `<div class="row"><button id="ins-copy" title="Ctrl+C">Copy</button><button id="ins-dup" title="Ctrl+D">Duplicate</button></div>` : ""}
     ${a.kind === "conveyor" ? `<div class="kv"><div>From</div><div>${esc(a.ports?.source?.asset_id)} · ${esc(a.ports?.source?.port)}</div>
       <div>To</div><div>${esc(a.ports?.target?.asset_id)} · ${esc(a.ports?.target?.port)}</div></div>` : ""}
     <h4>Configuration <span class="hint">· applied changes are versioned</span></h4>
@@ -294,6 +320,10 @@ async function renderInspector(force = false) {
   for (const ev of ["input", "change"]) {
     $("#ins-form").addEventListener(ev, () => (inspectorDirty = true));
     $("#ins-config").addEventListener(ev, () => (inspectorDirty = true));
+  }
+  if ($("#ins-copy")) {
+    $("#ins-copy").onclick = () => copyAsset(a.id);
+    $("#ins-dup").onclick = () => { copyAsset(a.id); pasteAsset(); };
   }
   $("#ins-revert").onclick = () => { inspectorDirty = false; renderInspector(true); };
   $("#ins-rename").onclick = () => act(() => api("POST", `/api/assets/${encodeURIComponent(a.id)}/rename`, { name: $("#ins-name").value }), "Renamed");
@@ -335,6 +365,49 @@ function lineageHtml(n) {
   return `<li><span class="link" data-pid="${esc(n.id)}">${esc(n.label)}</span> (${esc(n.product_type_id)}${n.is_defective ? ", defective" : ""})
     ${n.parents && n.parents.length ? `<ul class="tree">${n.parents.map(lineageHtml).join("")}</ul>` : ""}${n.truncated ? " …" : ""}</li>`;
 }
+// Inherited entries from the same batch/cycle differ only by product: collapse them into one row.
+function groupHistory(history) {
+  const groups = [], byKey = new Map();
+  for (const h of history) {
+    const { is_defective, ...rest } = h.attributes || {};
+    const key = h.inherited ? JSON.stringify([h.activity, h.activity_type, h.timestamp_start, h.timestamp_end,
+      h.case_id, h.cycle_id, rest]) : h.entry_id;
+    let g = byKey.get(key);
+    if (!g) { g = { ...h, attributes: rest, products: [], defective: 0 }; byKey.set(key, g); groups.push(g); }
+    g.products.push(h.product_id);
+    g.defective += is_defective ? 1 : 0;
+  }
+  return groups;
+}
+function attrValue(v) {
+  if (v && typeof v === "object") {
+    const n = Array.isArray(v) ? v.length : Object.keys(v).length;
+    const s = JSON.stringify(v);
+    return s.length <= 40 ? esc(s) : `<span title="${esc(s)}">{${n} entries}</span>`;
+  }
+  return esc(typeof v === "number" ? +v.toFixed(4) : v);
+}
+const HIDDEN_ATTRS = new Set(["activity_name"]);
+function attrChips(attrs) {
+  return Object.entries(attrs || {}).filter(([k, v]) => !HIDDEN_ATTRS.has(k) && v !== null && v !== undefined)
+    .map(([k, v]) => `<span class="chip"><b>${esc(k.replace(/_/g, " "))}</b> ${attrValue(v)}</span>`).join("");
+}
+function historyHtml(history) {
+  const groups = groupHistory(history);
+  return `<h4>History (${groups.length} steps from ${history.length} entries; inherited steps in italics)</h4>
+    <table class="hist"><tr><th>activity</th><th>type</th><th>start</th><th>end</th><th>case</th><th>product(s)</th><th>attributes</th></tr>
+    ${groups.map((g) => {
+      const own = !g.inherited;
+      const prod = own ? "self" : g.products.length === 1
+        ? `<span class="link" data-pid="${esc(g.products[0])}">${esc(g.products[0].slice(0, 12))}…</span>`
+        : `<details><summary>${g.products.length} products${g.defective ? ` · ${g.defective} defective` : ""}</summary>
+            ${g.products.map((p) => `<span class="link" data-pid="${esc(p)}">${esc(p.slice(0, 12))}…</span>`).join(" ")}</details>`;
+      const defect = g.products.length === 1 && g.defective ? '<span class="chip bad">defective</span>' : "";
+      return `<tr class="${own ? "" : "inherited"}"><td title="${esc(g.attributes.activity_name || "")}">${esc(g.activity)}</td><td>${esc(g.activity_type)}</td>
+        <td>${fmt(g.timestamp_start)}</td><td>${fmt(g.timestamp_end)}</td><td>${esc(g.case_id)}</td><td>${prod}</td>
+        <td class="chips">${defect}${attrChips(g.attributes)}</td></tr>`;
+    }).join("")}</table>`;
+}
 async function openProduct(pid) {
   let r;
   try { r = await api("GET", `/api/products/${encodeURIComponent(pid)}`); } catch (e) { return toast(e.message); }
@@ -352,12 +425,7 @@ async function openProduct(pid) {
       <div>children</div><div>${children.map((c) => `<span class="link" data-pid="${esc(c)}">${esc(c.slice(0, 12))}…</span>`).join(" ") || "–"}</div>
     </div>
     <h4>Lineage</h4><ul class="tree">${lineageHtml(r.lineage)}</ul>
-    <h4>History (${r.history.length} entries; inherited entries in italics)</h4>
-    <table class="hist"><tr><th>activity</th><th>type</th><th>start</th><th>end</th><th>case</th><th>product</th><th>attributes</th></tr>
-    ${r.history.map((h) => `<tr class="${h.inherited ? "inherited" : ""}"><td>${esc(h.activity)}</td><td>${esc(h.activity_type)}</td>
-      <td>${fmt(h.timestamp_start)}</td><td>${fmt(h.timestamp_end)}</td><td>${esc(h.case_id)}</td>
-      <td>${h.inherited ? `<span class="link" data-pid="${esc(h.product_id)}">${esc(h.product_id.slice(0, 12))}…</span>` : "self"}</td>
-      <td><pre>${esc(JSON.stringify(h.attributes))}</pre></td></tr>`).join("")}</table>
+    ${historyHtml(r.history)}
     <h4>Raw record</h4><pre>${esc(JSON.stringify(r, null, 1)).slice(0, 20000)}</pre>`;
   $("#modal").classList.remove("hidden");
 }

@@ -189,3 +189,26 @@ def test_operational_history_has_no_zero_length_same_state_intervals():
     for a, b in zip(hist, hist[1:]):
         assert not (a.state == b.state and a.end == a.start), (a, b)
     assert all(h.end is None or h.end >= h.start for h in hist)
+
+
+def test_ports_follow_recipe_and_sink_has_single_input():
+    sim = smelter()
+    info = sim.get_asset("t").port_info()
+    assert info["inputs"] == ["in0", "in1"] and info["outputs"] == ["out0", "out1"]
+    assert info["labels"]["in0"].startswith("2×") and "by-product" in info["labels"]["out1"]
+    assert sim.get_asset("sm").port_info()["inputs"] == ["in0"]
+    with pytest.raises((ValidationError, ConflictError)):
+        sim.add_conveyor("cx", port("t", "out1"), port("sm", "in1"), {"length_m": 1, "speed_m_s": 1})
+
+
+def test_defects_cascade_by_default():
+    sim = smelter(seed=3)
+    sim.update_config("ore", {"defect_probability": 1.0})
+    assert sim.recipes["smelt"].defect_policy == "any_defective_input"
+    sim.start()
+    sim.run_until(200)
+    outs = [sim.products[o] for c in sim.cycles.values() if c.asset_id == "t" and c.status == "completed"
+            for o in c.output_ids]
+    assert outs and all(p.is_defective for p in outs)
+    entry = next(h for h in outs[0].history if h.attributes.get("role") == "output")
+    assert entry.attributes["defect_cause"] == "defective_input"

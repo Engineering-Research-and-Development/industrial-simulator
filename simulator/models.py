@@ -94,7 +94,7 @@ class Recipe:
     processing_time_s: float
     description: str = ""
     parameters: dict[str, Any] = field(default_factory=dict)
-    defect_policy: str = "independent"
+    defect_policy: str = "any_defective_input"
 
     @classmethod
     def from_dict(cls, d: dict, known_types: set[str] | None = None) -> "Recipe":
@@ -119,7 +119,7 @@ class Recipe:
                 result.append(RecipeItem(ptid, qty, byp))
             return result
 
-        policy = d.get("defect_policy", "independent")
+        policy = d.get("defect_policy", "any_defective_input")
         if policy not in DEFECT_POLICIES:
             raise ValidationError(f"defect_policy must be one of {DEFECT_POLICIES}")
         return cls(
