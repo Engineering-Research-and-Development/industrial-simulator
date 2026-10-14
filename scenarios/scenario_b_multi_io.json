@@ -1,0 +1,56 @@
+{
+  "format": "industrial-sim-scenario/v1",
+  "name": "Scenario B - Multiple inputs and outputs",
+  "description": "A bronze foundry consumes copper, tin and flux and produces bronze ingots plus slag as a by-product; a percentage splitter balances ingots between two warehouses.",
+  "seed": 7,
+  "product_types": [
+    {"id": "copper", "name": "Copper cathode"},
+    {"id": "tin", "name": "Tin ingot"},
+    {"id": "flux", "name": "Flux"},
+    {"id": "bronze", "name": "Bronze ingot"},
+    {"id": "slag", "name": "Slag", "description": "By-product"}
+  ],
+  "production_orders": [
+    {"id": "PO-CU", "name": "Copper supply order"},
+    {"id": "PO-SN", "name": "Tin supply order"}
+  ],
+  "recipes": [
+    {"id": "bronze-casting", "name": "Bronze casting", "processing_time_s": 12, "defect_policy": "independent",
+     "inputs": [{"product_type_id": "copper", "quantity": 3}, {"product_type_id": "tin", "quantity": 1},
+                {"product_type_id": "flux", "quantity": 1}],
+     "outputs": [{"product_type_id": "bronze", "quantity": 2},
+                 {"product_type_id": "slag", "quantity": 1, "is_byproduct": true}]}
+  ],
+  "assets": [
+    {"id": "copper-src", "kind": "producer", "name": "Copper supply", "position": {"x": 80, "y": 80},
+     "config": {"product_type_id": "copper", "batch_quantity": 6, "interval": 20, "production_order_id": "PO-CU"}},
+    {"id": "tin-src", "kind": "producer", "name": "Tin supply", "position": {"x": 80, "y": 240},
+     "config": {"product_type_id": "tin", "batch_quantity": 2, "interval": 20, "production_order_id": "PO-SN"}},
+    {"id": "flux-src", "kind": "producer", "name": "Flux supply", "position": {"x": 80, "y": 400},
+     "config": {"product_type_id": "flux", "batch_quantity": 2, "interval": 20}},
+    {"id": "foundry", "kind": "transformer", "name": "Bronze foundry", "position": {"x": 400, "y": 240},
+     "config": {"recipe_id": "bronze-casting", "speed_pct": 60}},
+    {"id": "ingot-split", "kind": "splitter", "name": "Ingot balancer", "position": {"x": 680, "y": 140},
+     "config": {"mode": "percentage", "percentage_a": 70}},
+    {"id": "warehouse-1", "kind": "sink", "name": "Warehouse 1", "position": {"x": 940, "y": 60},
+     "config": {"accepted_product_type_ids": ["bronze"]}},
+    {"id": "warehouse-2", "kind": "sink", "name": "Warehouse 2", "position": {"x": 940, "y": 220},
+     "config": {"accepted_product_type_ids": ["bronze"]}},
+    {"id": "slag-bin", "kind": "sink", "name": "Slag bin", "position": {"x": 940, "y": 400},
+     "config": {"accepted_product_type_ids": ["slag"]}},
+    {"id": "c-copper", "kind": "conveyor", "name": "Copper belt", "source": {"asset_id": "copper-src", "port": "out"},
+     "target": {"asset_id": "foundry", "port": "in0"}, "config": {"length_m": 10, "capacity_per_m": 1, "speed_m_s": 1}},
+    {"id": "c-tin", "kind": "conveyor", "name": "Tin belt", "source": {"asset_id": "tin-src", "port": "out"},
+     "target": {"asset_id": "foundry", "port": "in1"}, "config": {"length_m": 8, "capacity_per_m": 1, "speed_m_s": 1}},
+    {"id": "c-flux", "kind": "conveyor", "name": "Flux belt", "source": {"asset_id": "flux-src", "port": "out"},
+     "target": {"asset_id": "foundry", "port": "in2"}, "config": {"length_m": 10, "capacity_per_m": 1, "speed_m_s": 1}},
+    {"id": "c-bronze", "kind": "conveyor", "name": "Bronze belt", "source": {"asset_id": "foundry", "port": "out0"},
+     "target": {"asset_id": "ingot-split", "port": "in"}, "config": {"length_m": 8, "capacity_per_m": 1, "speed_m_s": 1}},
+    {"id": "c-slag", "kind": "conveyor", "name": "Slag belt", "source": {"asset_id": "foundry", "port": "out1"},
+     "target": {"asset_id": "slag-bin", "port": "in0"}, "config": {"length_m": 12, "capacity_per_m": 1, "speed_m_s": 1}},
+    {"id": "c-w1", "kind": "conveyor", "name": "To warehouse 1", "source": {"asset_id": "ingot-split", "port": "out_a"},
+     "target": {"asset_id": "warehouse-1", "port": "in0"}, "config": {"length_m": 6, "capacity_per_m": 1, "speed_m_s": 1}},
+    {"id": "c-w2", "kind": "conveyor", "name": "To warehouse 2", "source": {"asset_id": "ingot-split", "port": "out_b"},
+     "target": {"asset_id": "warehouse-2", "port": "in0"}, "config": {"length_m": 6, "capacity_per_m": 1, "speed_m_s": 1}}
+  ]
+}

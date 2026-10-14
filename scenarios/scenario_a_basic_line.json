@@ -1,0 +1,63 @@
+{
+  "format": "industrial-sim-scenario/v1",
+  "name": "Scenario A - Basic screw production line",
+  "description": "Iron billets + coal -> steel -> screws -> quality-check splitter -> accepted / rejected sinks.",
+  "seed": 42,
+  "product_types": [
+    {"id": "iron-billet", "name": "Iron billet", "description": "Raw iron billet"},
+    {"id": "coal", "name": "Coal", "description": "Coal unit"},
+    {"id": "steel", "name": "Steel", "description": "Steel unit"},
+    {"id": "screw", "name": "Screw", "description": "Finished screw"}
+  ],
+  "production_orders": [
+    {"id": "PO-1001", "name": "Screw order 1001", "description": "Demo production order"}
+  ],
+  "recipes": [
+    {"id": "steel-smelting", "name": "Steel smelting", "processing_time_s": 20,
+     "inputs": [{"product_type_id": "iron-billet", "quantity": 10}, {"product_type_id": "coal", "quantity": 5}],
+     "outputs": [{"product_type_id": "steel", "quantity": 2}],
+     "parameters": {"furnace_temperature_c": 1500}},
+    {"id": "screw-forming", "name": "Screw forming", "processing_time_s": 8,
+     "inputs": [{"product_type_id": "steel", "quantity": 1}],
+     "outputs": [{"product_type_id": "screw", "quantity": 4}]}
+  ],
+  "assets": [
+    {"id": "iron-producer", "kind": "producer", "name": "Iron billet producer", "position": {"x": 80, "y": 120},
+     "config": {"product_type_id": "iron-billet", "batch_quantity": 10, "interval": 30, "interval_unit": "seconds",
+                "production_order_id": "PO-1001"}},
+    {"id": "coal-producer", "kind": "producer", "name": "Coal producer", "position": {"x": 80, "y": 320},
+     "config": {"product_type_id": "coal", "batch_quantity": 5, "interval": 30, "interval_unit": "seconds",
+                "production_order_id": "PO-1001"}},
+    {"id": "steel-furnace", "kind": "transformer", "name": "Steel furnace", "position": {"x": 380, "y": 210},
+     "config": {"recipe_id": "steel-smelting", "speed_pct": 50}},
+    {"id": "screw-press", "kind": "transformer", "name": "Screw press", "position": {"x": 660, "y": 210},
+     "config": {"recipe_id": "screw-forming", "speed_pct": 85}},
+    {"id": "qc-splitter", "kind": "splitter", "name": "Quality check", "position": {"x": 920, "y": 210},
+     "config": {"mode": "conditional", "fallback_branch": "A",
+                "rules": [{"attribute": "is_defective", "operator": "eq", "value": true, "branch": "B"}]}},
+    {"id": "accepted-sink", "kind": "sink", "name": "Accepted screws", "position": {"x": 1180, "y": 110},
+     "config": {"accepted_product_type_ids": ["screw"],
+                "completion_criteria": [{"attribute": "is_defective", "operator": "eq", "value": false}]}},
+    {"id": "rejected-sink", "kind": "sink", "name": "Rejected screws", "position": {"x": 1180, "y": 330},
+     "config": {"accepted_product_type_ids": ["screw"],
+                "completion_criteria": [{"attribute": "is_defective", "operator": "eq", "value": false}]}},
+    {"id": "belt-iron", "kind": "conveyor", "name": "Iron belt",
+     "source": {"asset_id": "iron-producer", "port": "out"}, "target": {"asset_id": "steel-furnace", "port": "in0"},
+     "config": {"length_m": 20, "capacity_per_m": 1, "speed_m_s": 2}},
+    {"id": "belt-coal", "kind": "conveyor", "name": "Coal belt",
+     "source": {"asset_id": "coal-producer", "port": "out"}, "target": {"asset_id": "steel-furnace", "port": "in1"},
+     "config": {"length_m": 15, "capacity_per_m": 1, "speed_m_s": 1.5}},
+    {"id": "belt-steel", "kind": "conveyor", "name": "Steel belt",
+     "source": {"asset_id": "steel-furnace", "port": "out0"}, "target": {"asset_id": "screw-press", "port": "in0"},
+     "config": {"length_m": 12, "capacity_per_m": 0.5, "speed_m_s": 1}},
+    {"id": "belt-screws", "kind": "conveyor", "name": "Screw belt",
+     "source": {"asset_id": "screw-press", "port": "out0"}, "target": {"asset_id": "qc-splitter", "port": "in"},
+     "config": {"length_m": 10, "capacity_per_m": 2, "speed_m_s": 1}},
+    {"id": "belt-accepted", "kind": "conveyor", "name": "Accepted belt",
+     "source": {"asset_id": "qc-splitter", "port": "out_a"}, "target": {"asset_id": "accepted-sink", "port": "in0"},
+     "config": {"length_m": 8, "capacity_per_m": 2, "speed_m_s": 1}},
+    {"id": "belt-rejected", "kind": "conveyor", "name": "Rejected belt",
+     "source": {"asset_id": "qc-splitter", "port": "out_b"}, "target": {"asset_id": "rejected-sink", "port": "in0"},
+     "config": {"length_m": 8, "capacity_per_m": 2, "speed_m_s": 1}}
+  ]
+}
