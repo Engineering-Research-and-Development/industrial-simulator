@@ -120,3 +120,15 @@ def test_static_ui_served(client):
     r = client.get("/")
     assert r.status_code == 200 and "<canvas" in r.text
     assert client.get("/static/app.js").status_code == 200
+
+
+def test_order_crud(client):
+    assert client.post("/api/orders", json={"id": "PO-X", "name": "X"}).status_code == 201
+    r = client.put("/api/orders/PO-X", json={"description": "edited", "attributes": {"customer": "ACME"}})
+    assert r.status_code == 200 and r.json()["description"] == "edited" and r.json()["attributes"] == {"customer": "ACME"}
+    assert client.put("/api/orders/PO-X", json={"id": "other"}).status_code == 422
+    assert client.put("/api/orders/missing", json={"name": "n"}).status_code == 404
+    assert client.delete("/api/orders/PO-X").status_code == 204
+    assert client.delete("/api/orders/order-default").status_code == 409
+    used = next(a["config"]["production_order_id"] for a in client.get("/api/assets").json() if a["kind"] == "producer")
+    assert client.delete(f"/api/orders/{used}").status_code == 409

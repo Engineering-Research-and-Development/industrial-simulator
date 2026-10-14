@@ -61,14 +61,14 @@ docker run -p 8000:8000 -v sim-data:/data industrial-sim
 | Load a built-in scenario | Toolbar select → **Load** |
 | Run | **Start** / **Pause** / **Resume** / **Stop** / **Reset**. **Step** advances N simulated seconds while paused |
 | Accelerate | **Speed ×** (0.5 … 1000; the API accepts up to 10000) |
-| Add an asset | Left palette (producer, transformer, splitter, sink) |
+| Add an asset | Left palette (producer, transformer, splitter, sink) opens a form dialog with name, settings and a live preview (throughput, cycle time, quality) |
 | Connect | Click an **output port** (right side), then an **input port** (left side). This creates a conveyor |
 | Move / delete | Drag a node. Select it and press **Del** |
 | Pan / zoom / fit | Drag the background / mouse wheel / double-click the background |
-| Inspect | Click an asset to see its state, commands (start/stop/fault/restart), JSON config editor (versioned changes), statistics, operational history, config changes, and products received (sinks) |
+| Inspect | Click an asset to see its state, commands (start/stop/fault/restart), a form-based config editor per asset kind (dropdowns, sliders, rule and attribute rows, live preview; **Apply changes** sends only the changed fields as a versioned change; a raw-JSON fallback is under *Advanced*), statistics, operational history, config changes, and products received (sinks) |
 | Products / DPP | **Products** tab → search → click a product to see its passport (identity, provenance, lineage tree, full history with inherited entries in italics) |
-| Catalog | Product types, recipes, production orders |
-| Integration | Enable a broker adapter and inspect the published messages (in-memory adapter) |
+| Catalog | Cards for product types, recipes and production orders with **+ New**, **Edit** and **Delete**. Recipes are built visually: input/output rows (type, quantity, by-product), processing time, defect policy, parameters |
+| Integration | Choose an adapter and fill in its connection fields (host/port/QoS, bootstrap servers, service URL), topic prefix and event categories; inspect published messages (in-memory adapter) |
 | Save state | **Export JSON** / **Import JSON** (scenario definition); **Save ckpt** / **Restore ckpt** (full runtime state) |
 
 Conveyor items are drawn at their real position; defective items are red.
@@ -91,7 +91,7 @@ Interactive OpenAPI docs are at `/docs`.
 |---|---|
 | Clock | `GET /api/sim`, `POST /api/sim/{start,pause,resume,stop,reset,step,acceleration}` |
 | State | `GET /api/state`, `/api/metrics`, `/api/validation`, `/api/invariants`, `/api/pending` |
-| Catalog | `GET/POST/PUT/DELETE /api/product-types`, `/api/recipes`; `GET/POST /api/orders` |
+| Catalog | `GET/POST/PUT/DELETE /api/product-types`, `/api/recipes`, `/api/orders` |
 | Network | `GET/POST /api/assets`, `POST /api/connections`, `GET/DELETE /api/assets/{id}`, `PATCH /api/assets/{id}/config`, `POST /api/assets/{id}/rename`, `PUT /api/assets/{id}/position`, `POST /api/assets/{id}/commands` |
 | History | `GET /api/assets/{id}/stats`, `/operational-history`, `/products`; `GET /api/config-changes`; `GET /api/events?since_seq=&event_type=&asset_id=` |
 | Traceability | `GET /api/products?…`, `GET /api/products/{id}` (DPP), `GET /api/products/{id}/history`, `GET /api/cycles`, `GET /api/cycles/{id}` |

@@ -139,6 +139,31 @@ class Simulation:
         self.orders[o.id] = o
         return o
 
+    def update_order(self, order_id: str, data: dict) -> ProductionOrder:
+        current = self.get_order(order_id)
+        if "id" in data and data["id"] != order_id:
+            raise ValidationError("production order IDs are immutable")
+        o = ProductionOrder.from_dict({**current.to_dict(), **data, "id": order_id})
+        self.orders[order_id] = o
+        self._record_change(f"order:{order_id}", current.to_dict(), o.to_dict(), 0, "immediate (descriptive)")
+        return o
+
+    def delete_order(self, order_id: str) -> None:
+        self.get_order(order_id)
+        if order_id == self.default_order_id:
+            raise ConflictError("the default production order cannot be deleted")
+        users = [a.id for a in self.assets.values() if isinstance(a, Producer)
+                 and a.config["production_order_id"] == order_id]
+        if users or any(order_id in p.production_order_ids for p in self.products.values()):
+            raise ConflictError(f"production order '{order_id}' is in use ({', '.join(users) or 'existing products'})")
+        del self.orders[order_id]
+
+    def get_order(self, order_id: str) -> ProductionOrder:
+        try:
+            return self.orders[order_id]
+        except KeyError:
+            raise NotFoundError(f"unknown production order '{order_id}'") from None
+
     # ================================================================== assets
     def _new_asset_id(self, kind: str) -> str:
         while True:

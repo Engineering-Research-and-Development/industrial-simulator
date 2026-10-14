@@ -233,6 +233,16 @@ def create_app(service: SimulationService | None = None) -> FastAPI:
         with lock:
             return svc.sim.add_order(body_dict(payload)).to_dict()
 
+    @app.put("/api/orders/{order_id}")
+    def update_order(order_id: str, payload: Any = Body(...)):
+        with lock:
+            return svc.sim.update_order(order_id, body_dict(payload)).to_dict()
+
+    @app.delete("/api/orders/{order_id}", status_code=204)
+    def delete_order(order_id: str):
+        with lock:
+            svc.sim.delete_order(order_id)
+
     # ------------------------------------------------------------------ assets
     @app.get("/api/assets")
     def list_assets():

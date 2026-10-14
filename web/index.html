@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>Industrial Digital Twin Simulator</title>
-  <link rel="stylesheet" href="/static/style.css?v=4">
+  <link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
 <header id="toolbar">
@@ -82,26 +82,33 @@
       <div id="product-list" class="log"></div>
     </div>
     <div id="tab-catalog" class="tab">
-      <h4>Product types</h4><div id="types-list"></div>
-      <textarea id="type-json" rows="4">{"id": "new-type", "name": "New type", "attributes": {}}</textarea>
-      <button id="btn-add-type">Add product type</button>
-      <h4>Recipes</h4><div id="recipes-list"></div>
-      <textarea id="recipe-json" rows="6">{"id": "new-recipe", "name": "New recipe",       "processing_time_s": 10,
- "inputs": [{"product_type_id": "iron-billet", "quantity": 1}],
-       "outputs": [{"product_type_id": "steel", "quantity": 1}]}</textarea>
-      <button id="btn-add-recipe">Add recipe</button>
-      <h4>Production orders</h4><div id="orders-list"></div>
-      <textarea id="order-json" rows="2">{"id": "PO-NEW", "name": "New order", "description": ""}</textarea>
-      <button id="btn-add-order">Add order</button>
+      <div class="cat-head"><h4>Product types</h4><button class="small primary" data-new="type">+ New type</button></div>
+      <div id="types-list"></div>
+      <div class="cat-head"><h4>Recipes</h4><button class="small primary" data-new="recipe">+ New recipe</button></div>
+      <div id="recipes-list"></div>
+      <div class="cat-head"><h4>Production orders</h4><button class="small primary" data-new="order">+ New order</button></div>
+      <div id="orders-list"></div>
     </div>
     <div id="tab-integration" class="tab">
       <p class="hint">Publish machine/product/config events and metrics to a broker. The in-memory adapter
         needs no external service; Kafka/MQTT/Pulsar require their Python client libraries and a running broker.</p>
-      <select id="int-adapter"><option>none</option><option selected>memory</option><option>mqtt</option>
-        <option>kafka</option><option>pulsar</option></select>
-      <textarea id="int-options" rows="3">{}</textarea>
-      <button id="btn-int-apply">Apply</button>
-      <pre id="int-info"></pre>
+      <div class="form">
+        <div class="f"><label class="lbl">Adapter</label><div class="fbody">
+          <select id="int-adapter"><option value="none">Disabled</option><option value="memory">In-memory (testing)</option>
+            <option value="mqtt">MQTT</option><option value="kafka">Kafka</option><option value="pulsar">Pulsar</option></select></div></div>
+      </div>
+      <div id="int-options"></div>
+      <div id="int-common" class="form">
+        <div class="f"><label class="lbl">Topic prefix</label><div class="fbody"><input id="int-prefix" value="industrial-sim"></div></div>
+        <div class="f"><label class="lbl">Publish</label><div class="fbody checks" id="int-cats">
+          <label class="check"><input type="checkbox" value="machine" checked>machine</label>
+          <label class="check"><input type="checkbox" value="product" checked>product</label>
+          <label class="check"><input type="checkbox" value="config" checked>config</label>
+          <label class="check"><input type="checkbox" value="metrics" checked>metrics</label></div></div>
+      </div>
+      <div class="row"><button id="btn-int-apply" class="primary">Apply</button></div>
+      <h4>Status</h4>
+      <div id="int-info" class="log"></div>
       <button id="btn-int-msgs">Show last messages</button>
       <pre id="int-msgs" class="log"></pre>
     </div>
@@ -113,6 +120,7 @@
     <div id="modal-content"></div>
   </div>
 </div>
-<script src="/static/app.js?v=4"></script>
+<script src="/static/forms.js?v=5"></script>
+<script src="/static/app.js?v=5"></script>
 </body>
 </html>

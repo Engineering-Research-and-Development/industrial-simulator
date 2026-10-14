@@ -236,24 +236,10 @@ window.addEventListener("keydown", (ev) => {
 });
 
 // ------------------------------------------------------------------ palette
-const DEFAULT_CONFIG = {
-  producer: async () => {
-    const types = await api("GET", "/api/product-types");
-    if (!types.length) throw new Error("create a product type first (Catalog tab)");
-    return { product_type_id: types[0].id, batch_quantity: 1, interval: 10, interval_unit: "seconds" };
-  },
-  transformer: async () => ({ recipe_id: null, speed_pct: 50 }),
-  splitter: async () => ({ mode: "percentage", percentage_a: 50 }),
-  sink: async () => ({}),
-};
 document.querySelectorAll("#palette button[data-kind]").forEach((b) => b.addEventListener("click", () => {
-  const kind = b.dataset.kind;
   const n = nodes().length;
-  act(async () => {
-    const a = await api("POST", "/api/assets", { kind, name: `New ${kind}`, config: await DEFAULT_CONFIG[kind](),
-      position: { x: Math.round((40 - view.ox) / view.s) + (n % 5) * 30, y: Math.round((40 - view.oy) / view.s) + (n % 4) * 20 } });
-    select(a.id);
-  }, `${kind} added`);
+  openAssetDialog(b.dataset.kind, { x: Math.round((40 - view.ox) / view.s) + (n % 5) * 30, y: Math.round((40 - view.oy) / view.s) + (n % 4) * 20 })
+    .catch((e) => toast(e.message));
 }));
 
 // ------------------------------------------------------------------ inspector
@@ -268,6 +254,10 @@ async function renderInspector(force = false) {
   if (!force && (inspectorDirty || el.contains(document.activeElement))) return;
   const ops = await api("GET", `/api/assets/${encodeURIComponent(a.id)}/operational-history?limit=15`).catch(() => []);
   const changes = await api("GET", `/api/config-changes?asset_id=${encodeURIComponent(a.id)}&limit=10`).catch(() => []);
+  const ctx = await loadCtx().catch(() => ({ types: [], recipes: [], orders: [] }));
+  if (!force && (inspectorDirty || el.contains(document.activeElement))) return;
+  const scroll = el.dataset.assetId === a.id ? el.scrollTop : 0;
+  el.dataset.assetId = a.id;
   el.innerHTML = `
     <div class="kv">
       <div>ID</div><div>${esc(a.id)}</div>
@@ -280,30 +270,47 @@ async function renderInspector(force = false) {
       <button data-cmd="start">Start</button><button data-cmd="stop">Stop</button>
       <button data-cmd="fault">Inject fault</button><button data-cmd="restart">Restart</button>
     </div>
-    <h4>Configuration (edit JSON, then Apply – changes are versioned)</h4>
-    <textarea id="ins-config" rows="10">${esc(JSON.stringify(a.config, null, 2))}</textarea>
-    <div class="row"><button id="ins-apply" class="primary">Apply config</button><button id="ins-revert">Revert</button></div>
+    ${a.kind === "conveyor" ? `<div class="kv"><div>From</div><div>${esc(a.ports?.source?.asset_id)} · ${esc(a.ports?.source?.port)}</div>
+      <div>To</div><div>${esc(a.ports?.target?.asset_id)} · ${esc(a.ports?.target?.port)}</div></div>` : ""}
+    <h4>Configuration <span class="hint">· applied changes are versioned</span></h4>
+    <div id="ins-form"></div>
+    <div class="row"><button id="ins-apply" class="primary">Apply changes</button><button id="ins-revert">Revert</button></div>
+    <details class="section" id="ins-raw" ${SECTION_OPEN.rawJson ? "open" : ""}><summary>Raw JSON (advanced)</summary>
+      <textarea id="ins-config" rows="10">${esc(JSON.stringify(a.config, null, 2))}</textarea>
+      <div class="row"><button id="ins-apply-json">Apply JSON</button></div></details>
     ${a.kind === "sink" ? '<h4>Received products</h4><div class="row"><select id="sink-filter"><option value="">all</option><option value="completed=true">completed</option><option value="completed=false">stored</option><option value="defective=true">defective</option></select><button id="sink-list">List</button></div><div id="sink-products" class="log"></div>' : ""}
-    <h4>Statistics</h4><pre>${esc(JSON.stringify(a.stats, null, 1))}</pre>
+    <h4>Statistics</h4><div class="kv stats">${Object.entries(a.stats || {}).map(([k, v]) =>
+      `<div>${esc(k.replace(/_/g, " "))}</div><div>${esc(typeof v === "number" ? +v.toFixed(3) : showValue(v) || "–")}</div>`).join("")}</div>
     <h4>Operational history (latest)</h4>
     <table class="hist"><tr><th>state</th><th>start</th><th>end</th><th>reason</th></tr>
       ${ops.slice().reverse().map((o) => `<tr><td>${esc(o.state)}</td><td>${fmt(o.start)}</td><td>${fmt(o.end)}</td><td>${esc(o.reason || "")}</td></tr>`).join("")}</table>
     <h4>Configuration changes</h4>
     ${changes.length ? changes.slice().reverse().map((c) => `<pre>t=${fmt(c.timestamp)} v${c.version}: ${esc(JSON.stringify(c.changes))}\n  (${esc(c.effective)})</pre>`).join("") : '<p class="hint">none</p>'}
   `;
-  $("#ins-config").addEventListener("input", () => (inspectorDirty = true));
-  $("#ins-revert").onclick = () => renderInspector(true);
+  const form = buildForm(ASSET_SCHEMAS[a.kind] || [], a.config, ctx, ASSET_PREVIEWS[a.kind]);
+  $("#ins-form").append(form.el);
+  $("#ins-raw").addEventListener("toggle", () => (SECTION_OPEN.rawJson = $("#ins-raw").open));
+  el.scrollTop = scroll;
+  for (const ev of ["input", "change"]) {
+    $("#ins-form").addEventListener(ev, () => (inspectorDirty = true));
+    $("#ins-config").addEventListener(ev, () => (inspectorDirty = true));
+  }
+  $("#ins-revert").onclick = () => { inspectorDirty = false; renderInspector(true); };
   $("#ins-rename").onclick = () => act(() => api("POST", `/api/assets/${encodeURIComponent(a.id)}/rename`, { name: $("#ins-name").value }), "Renamed");
   el.querySelectorAll("button[data-cmd]").forEach((b) => (b.onclick = () =>
     act(() => api("POST", `/api/assets/${encodeURIComponent(a.id)}/commands`, { command: b.dataset.cmd }), `${b.dataset.cmd} sent`)));
-  $("#ins-apply").onclick = async () => {
-    let next;
-    try { next = JSON.parse($("#ins-config").value); } catch (e) { return toast("Invalid JSON: " + e.message); }
+  const applyConfig = async (next) => {
     const patch = {};
     for (const [k, v] of Object.entries(next)) if (JSON.stringify(v) !== JSON.stringify(a.config[k])) patch[k] = v;
     if (!Object.keys(patch).length) return toast("No changes", true);
     const r = await act(() => api("PATCH", `/api/assets/${encodeURIComponent(a.id)}/config`, patch));
-    if (r) { toast(`Applied (v${r.version}) – effective: ${r.effective}`, true); renderInspector(true); }
+    if (r) { inspectorDirty = false; toast(`Applied (v${r.version}) – effective: ${r.effective}`, true); renderInspector(true); }
+  };
+  $("#ins-apply").onclick = () => applyConfig(form.get());
+  $("#ins-apply-json").onclick = () => {
+    let next;
+    try { next = JSON.parse($("#ins-config").value); } catch (e) { return toast("Invalid JSON: " + e.message); }
+    applyConfig(next);
   };
   if (a.kind === "sink") {
     $("#sink-list").onclick = async () => {
@@ -403,21 +410,58 @@ $("#pf-search").onclick = async () => {
 $("#pf-open").onclick = () => $("#pf-id").value && openProduct($("#pf-id").value.trim());
 
 // ------------------------------------------------------------------ catalog
-async function renderCatalog() {
-  const [types, recipes, orders] = await Promise.all([api("GET", "/api/product-types"), api("GET", "/api/recipes"), api("GET", "/api/orders")]);
-  $("#types-list").innerHTML = types.map((t) => `<pre>${esc(t.id)} – ${esc(t.name)}</pre>`).join("");
-  $("#recipes-list").innerHTML = recipes.map((r) => `<pre>${esc(r.id)}: ${r.inputs.map((i) => `${i.quantity}×${i.product_type_id}`).join(" + ")} → ${r.outputs.map((o) => `${o.quantity}×${o.product_type_id}`).join(" + ")} (${r.processing_time_s}s)</pre>`).join("");
-  $("#orders-list").innerHTML = orders.map((o) => `<pre>${esc(o.id)} – ${esc(o.description || "")}</pre>`).join("");
+function catalogCard(title, sub, body, kind, item, canDelete = true) {
+  return `<div class="card"><div class="card-head"><b>${esc(title)}</b> <span class="muted">${esc(sub)}</span>
+    <span class="card-actions"><button class="small" data-edit="${kind}" data-id="${esc(item.id)}">Edit</button>
+    ${canDelete ? `<button class="small del" data-del="${kind}" data-id="${esc(item.id)}">Delete</button>` : ""}</span></div>${body}</div>`;
 }
-function jsonFrom(sel) { return JSON.parse($(sel).value); }
-$("#btn-add-type").onclick = () => act(async () => { await api("POST", "/api/product-types", jsonFrom("#type-json")); renderCatalog(); }, "Product type added");
-$("#btn-add-recipe").onclick = () => act(async () => { await api("POST", "/api/recipes", jsonFrom("#recipe-json")); renderCatalog(); }, "Recipe added");
-$("#btn-add-order").onclick = () => act(async () => { await api("POST", "/api/orders", jsonFrom("#order-json")); renderCatalog(); }, "Order added");
+const chips = (obj) => Object.entries(obj || {}).map(([k, v]) => `<span class="chip">${esc(k)}: ${esc(showValue(v))}</span>`).join(" ");
+let catalogCache = null;
+async function renderCatalog() {
+  const ctx = catalogCache = await loadCtx();
+  $("#types-list").innerHTML = ctx.types.map((t) => catalogCard(t.name, t.id,
+    `${t.description ? `<div>${esc(t.description)}</div>` : ""}${chips(t.metadata)}`, "type", t)).join("") || '<p class="hint">No product types yet.</p>';
+  $("#recipes-list").innerHTML = ctx.recipes.map((r) => catalogCard(r.name, r.id,
+    `<div class="flow"><span>${esc(itemsText(ctx, r.inputs))}</span><span class="arrow">→</span><span>${esc(itemsText(ctx, r.outputs))}</span></div>
+     <div class="muted">${r.processing_time_s} s · ${r.defect_policy === "any_defective_input" ? "inherits input defects" : "machine quality"}</div>
+     ${r.description ? `<div>${esc(r.description)}</div>` : ""}${chips(r.parameters)}`, "recipe", r)).join("") || '<p class="hint">No recipes yet.</p>';
+  $("#orders-list").innerHTML = ctx.orders.map((o) => catalogCard(o.name, o.id,
+    `${o.description ? `<div>${esc(o.description)}</div>` : ""}${chips(o.attributes)}`, "order", o, o.id !== "order-default")).join("");
+}
+const CATALOG_KEYS = { type: "types", recipe: "recipes", order: "orders" };
+$("#tab-catalog").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button");
+  if (!b) return;
+  if (b.dataset.new) return openCatalogDialog(b.dataset.new).catch((e) => toast(e.message));
+  const kind = b.dataset.edit || b.dataset.del;
+  if (!kind) return;
+  const item = catalogCache?.[CATALOG_KEYS[kind]].find((x) => x.id === b.dataset.id);
+  if (b.dataset.edit) return openCatalogDialog(kind, item).catch((e) => toast(e.message));
+  if (confirm(`Delete ${CATALOG[kind].title} '${b.dataset.id}'?`))
+    act(async () => { await api("DELETE", `${CATALOG[kind].path}/${encodeURIComponent(b.dataset.id)}`); renderCatalog(); }, "Deleted");
+});
 
 // ------------------------------------------------------------------ integration
-async function renderIntegration() { $("#int-info").textContent = JSON.stringify(await api("GET", "/api/integration"), null, 1); }
+let intForm = null;
+function buildIntegrationForm(adapter, options) {
+  intForm = buildForm(INTEGRATION_FIELDS[adapter] || [], { ...INTEGRATION_DEFAULTS[adapter], ...(options || {}) }, {});
+  $("#int-options").replaceChildren(intForm.el);
+  $("#int-common").style.display = adapter === "none" ? "none" : "";
+}
+async function renderIntegration() {
+  const info = await api("GET", "/api/integration");
+  const cur = info.adapter || "none";
+  if (!intForm) { $("#int-adapter").value = INTEGRATION_FIELDS[cur] ? cur : "memory"; buildIntegrationForm($("#int-adapter").value); }
+  const st = info.adapter ? [`<b>${esc(info.adapter)}</b> active`, ...Object.entries(info).filter(([k]) => k !== "adapter")
+    .map(([k, v]) => `${esc(k)}: ${esc(showValue(v))}`)] : ["<b>disabled</b>"];
+  $("#int-info").innerHTML = st.map((s) => `<div>${s}</div>`).join("");
+}
+$("#int-adapter").onchange = () => buildIntegrationForm($("#int-adapter").value);
 $("#btn-int-apply").onclick = () => act(async () => {
-  await api("POST", "/api/integration", { adapter: $("#int-adapter").value, options: jsonFrom("#int-options") });
+  const cats = [...document.querySelectorAll("#int-cats input:checked")].map((c) => c.value);
+  if (!cats.length) throw new Error("select at least one event category");
+  await api("POST", "/api/integration", { adapter: $("#int-adapter").value, options: intForm ? intForm.get() : {},
+    topic_prefix: $("#int-prefix").value.trim() || "industrial-sim", categories: cats });
   renderIntegration();
 }, "Integration updated");
 $("#btn-int-msgs").onclick = async () => {
