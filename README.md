@@ -26,6 +26,34 @@ and the built-in scenario loaded at start-up.
 
 On Linux or macOS, use `.venv/bin/python` instead.
 
+`python -m simulator --checkpoint-dir DIR` stores checkpoints in a different directory. Every option
+also reads an environment variable: `SIM_HOST`, `SIM_PORT`, `SIM_SCENARIO` and `SIM_CHECKPOINT_DIR`.
+
+## Docker
+
+```powershell
+docker compose up --build                      # http://localhost:8000
+docker compose --profile mqtt up --build       # also starts a Mosquitto broker
+```
+
+* The image (`Dockerfile`, based on `python:3.12-slim`) runs as a non-root user and has a health check
+  on `/api/sim`.
+* Checkpoints persist in the `sim-data` volume (`/data/checkpoints`).
+* Compose variables:
+  * `SIM_PUBLISH_PORT`: host port (default 8000).
+  * `SIM_SCENARIO`: scenario loaded at start-up.
+  * `SIM_EXTRAS`: broker client libraries baked into the image (default `paho-mqtt`; for example
+    `"paho-mqtt kafka-python pulsar-client"`).
+* With the `mqtt` profile, enable the integration with
+  `{"adapter": "mqtt", "options": {"host": "mosquitto", "port": 1883}}`.
+
+Without Compose:
+
+```powershell
+docker build -t industrial-sim --build-arg EXTRAS="paho-mqtt" .
+docker run -p 8000:8000 -v sim-data:/data industrial-sim
+```
+
 ## Using the editor
 
 | Action | How |

@@ -75,7 +75,10 @@ class MqttPublisher(EventPublisher):  # pragma: no cover - requires an external 
         except ImportError as exc:
             raise ValidationError("MQTT adapter requires 'paho-mqtt' (pip install paho-mqtt)") from exc
         self.qos = qos
-        self.client = mqtt.Client()
+        if hasattr(mqtt, "CallbackAPIVersion"):     # paho-mqtt >= 2.0
+            self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        else:
+            self.client = mqtt.Client()
         self.client.connect(host, int(port))
         self.client.loop_start()
 
