@@ -17,6 +17,7 @@ let inspectorDirty = false;
 let view = { ox: 0, oy: 0, s: 1 };   // pan/zoom transform (screen = world * s + o)
 let pan = null;
 let needsFit = true;
+let userView = false;   // set once the user pans/zooms; disables automatic refits on resize
 
 // ------------------------------------------------------------------ API helpers
 async function api(method, path, body) {
@@ -187,9 +188,9 @@ function fitView() {
 canvas.addEventListener("wheel", (ev) => {
   ev.preventDefault();
   const p = screenXY(ev), k = ev.deltaY < 0 ? 1.1 : 1 / 1.1, s = Math.min(4, Math.max(0.2, view.s * k));
-  view.ox = p.x - ((p.x - view.ox) * s) / view.s; view.oy = p.y - ((p.y - view.oy) * s) / view.s; view.s = s;
+  userView = true; view.ox = p.x - ((p.x - view.ox) * s) / view.s; view.oy = p.y - ((p.y - view.oy) * s) / view.s; view.s = s;
 }, { passive: false });
-canvas.addEventListener("dblclick", (ev) => { if (!hitNode(canvasXY(ev).x, canvasXY(ev).y)) fitView(); });
+canvas.addEventListener("dblclick", (ev) => { if (!hitNode(canvasXY(ev).x, canvasXY(ev).y)) { userView = false; fitView(); } });
 canvas.addEventListener("mousedown", (ev) => {
   const { x, y } = canvasXY(ev);
   const port = hitPort(x, y);
@@ -211,7 +212,7 @@ canvas.addEventListener("mousedown", (ev) => {
 });
 canvas.addEventListener("mousemove", (ev) => {
   mouse = canvasXY(ev);
-  if (pan) { const sp = screenXY(ev); view.ox = pan.ox + sp.x - pan.x; view.oy = pan.oy + sp.y - pan.y; return; }
+  if (pan) { const sp = screenXY(ev); userView = true; view.ox = pan.ox + sp.x - pan.x; view.oy = pan.oy + sp.y - pan.y; return; }
   if (!drag || !state) return;
   const a = assetsById()[drag.id]; if (!a) return;
   a.position = { x: Math.round(mouse.x - drag.dx), y: Math.round(mouse.y - drag.dy) };
@@ -482,6 +483,8 @@ async function init() {
   const scs = await api("GET", "/api/scenarios").catch(() => []);
   $("#scenario-select").innerHTML = scs.map((s) => `<option value="${esc(s.id)}">${esc(s.name || s.id)}</option>`).join("");
   resize(); window.addEventListener("resize", resize);
+  // Layout can settle after the first fit (fonts, side panels): refit unless the user moved the view.
+  new ResizeObserver(() => { resize(); if (!userView) needsFit = true; }).observe(canvas);
   await refresh(); requestAnimationFrame(draw);
   setInterval(refresh, 100);
   setInterval(pollEvents, 500);
