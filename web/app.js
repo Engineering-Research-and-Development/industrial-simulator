@@ -113,6 +113,7 @@ function draw() {
   if (needsFit && nodes().length) { fitView(); needsFit = false; }
   const byId = assetsById();
   ctx.save(); ctx.translate(view.ox, view.oy); ctx.scale(view.s, view.s);
+  const convLabels = [], portLabels = [];
 
   for (const c of conveyors()) {
     const e = conveyorEnds(c, byId); if (!e) continue;
@@ -124,9 +125,7 @@ function draw() {
       ctx.fillStyle = it.defective ? "#ff5a5a" : "#ffd36b";
       ctx.fillRect(x - 3, y - 3, 6, 6);
     }
-    const mx = (e.a.x + e.b.x) / 2, my = (e.a.y + e.b.y) / 2;
-    ctx.fillStyle = "#c9d1dc"; ctx.font = "11px system-ui"; ctx.textAlign = "center";
-    ctx.fillText(`${c.name} ${c.counts.occupancy}/${c.counts.capacity}`, mx, my - 8);
+    convLabels.push({ e, text: `${c.name} ${c.counts.occupancy}/${c.counts.capacity}`, sel: c.id === selectedId });
   }
   if (pendingPort) {
     const a = byId[pendingPort.asset_id];
@@ -158,13 +157,51 @@ function draw() {
         ctx.fillStyle = connected ? "#9fd3ff" : "#1d2026";
         ctx.strokeStyle = pendingPort && pendingPort.asset_id === a.id && pendingPort.port === p ? "#f0a640" : "#9fd3ff";
         ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(pp.x, pp.y, PORT_R, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-        ctx.fillStyle = "#8b93a1"; ctx.font = "9px system-ui"; ctx.textAlign = dir === "in" ? "right" : "left";
-        ctx.fillText(a.ports.labels?.[p] || p, pp.x + (dir === "in" ? -8 : 8), pp.y - 7);
+        portLabels.push({ pp, dir, text: a.ports.labels?.[p] || p });
       }
     }
   }
+  drawLabels(portLabels, convLabels);
   ctx.restore();
   requestAnimationFrame(draw);
+}
+// Labels are placed after all shapes, on a dark pill, avoiding nodes and each other (greedy, first fit).
+function drawLabels(portLabels, convLabels) {
+  const placed = nodes().map((a) => ({ x: a.position.x - 1, y: a.position.y - 1, w: W + 2, h: nodeH(a) + 2 }));
+  const hit = (r) => placed.some((q) => r.x < q.x + q.w && q.x < r.x + r.w && r.y < q.y + q.h && q.y < r.y + r.h);
+  const pill = (r, text, color, bg) => {
+    ctx.fillStyle = bg; ctx.beginPath(); ctx.roundRect(r.x, r.y, r.w, r.h, 3); ctx.fill();
+    ctx.fillStyle = color; ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillText(text, r.x + 3, r.y + r.h / 2 + 0.5);
+    ctx.textBaseline = "alphabetic";
+  };
+  ctx.font = "9px system-ui";
+  for (const l of portLabels) {
+    const text = l.text.length > 18 ? l.text.slice(0, 17) + "\u2026" : l.text;
+    const w = ctx.measureText(text).width + 6, hgt = 12;
+    const x = l.dir === "in" ? l.pp.x - 8 - w : l.pp.x + 8;
+    const cands = [l.pp.y - 7 - hgt / 2 - 1, l.pp.y + 7 + hgt / 2 + 1, l.pp.y - 19, l.pp.y + 19].map((cy) => ({ x, y: cy - hgt / 2, w, h: hgt }));
+    const r = cands.find((c) => !hit(c)) || cands[0];
+    placed.push(r);
+    pill(r, text, "#9aa4b2", "rgba(29,32,38,.85)");
+  }
+  ctx.font = "11px system-ui";
+  for (const l of convLabels) {
+    const { a, b } = l.e;
+    const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    const nx = -(b.y - a.y) / len, ny = (b.x - a.x) / len;
+    const w = ctx.measureText(l.text).width + 8, hgt = 15;
+    const cands = [];
+    for (const t of [0.5, 0.38, 0.62, 0.28, 0.72, 0.2, 0.8]) {
+      for (const side of [-1, 1]) {
+        const off = side * (hgt / 2 + 4 + Math.abs(nx) * (w / 2 - hgt / 2));
+        const cx = a.x + (b.x - a.x) * t + nx * off, cy = a.y + (b.y - a.y) * t + ny * off;
+        cands.push({ x: cx - w / 2, y: cy - hgt / 2, w, h: hgt });
+      }
+    }
+    const r = cands.find((c) => !hit(c)) || cands[0];
+    placed.push(r);
+    pill(r, l.text, l.sel ? "#f0a640" : "#c9d1dc", "rgba(24,27,32,.9)");
+  }
 }
 function summaryLine(a) {
   const c = a.counts || {};
@@ -291,7 +328,7 @@ function deviceApiHtml(a, integ) {
     : `curl ${q(base + path)}`;
   const active = integ && integ.adapter && integ.adapter !== "none";
   const prefix = (integ && integ.topic_prefix) || "industrial-sim";
-  return `<details class="section" id="ins-api" ${SECTION_OPEN.deviceApi ? "open" : ""}><summary>API for this device</summary>
+  return `
     <p class="hint">Full interactive reference: <a href="/docs" target="_blank" rel="noopener">${esc(base)}/docs</a> (OpenAPI JSON at <code>/openapi.json</code>).</p>
     <table class="hist api">${rows.map((r) => `<tr><td><span class="method ${r[0].toLowerCase()}">${r[0]}</span></td>
       <td>${r[0] === "GET" ? `<a href="${esc(r[1])}" target="_blank" rel="noopener"><code>${esc(r[1])}</code></a>` : `<code>${esc(r[1])}</code>`}
@@ -299,101 +336,314 @@ function deviceApiHtml(a, integ) {
       <td><button class="small" data-copy="${esc(curl(r))}" title="Copy curl command">curl</button></td></tr>`).join("")}</table>
     <p class="hint">Broker messages ${active ? `(${esc(integ.adapter)} adapter active)` : "(enable an adapter in the Integration tab)"}:
       topics <code>${esc(prefix)}.machine</code>, <code>${esc(prefix)}.product</code>, <code>${esc(prefix)}.config</code>
-      with message key <code>${esc(a.id)}</code>.</p></details>`;
+      with message key <code>${esc(a.id)}</code>.</p>`;
 }
+// ------------------------------------------------------------------ inspector (extensible section registry)
+// The inspector is a list of sections. Each section is registered with registerInspectorSection(spec):
+//   id, order, title (string | (a) => string), kinds (optional list of asset kinds),
+//   collapsible / collapsed (default state), summary(a, shared) → html shown in the header,
+//   actions(a, shared) → [{label, title, primary, run(a, shared)}] header buttons (e.g. "Edit…" opening a modal),
+//   mount(a, body, shared, sec) → fills the body (may be async) – called on selection / explicit re-render,
+//   refresh(a, body, shared, prev, sec) → optional in-place live update, called every slow refresh.
+// A full render is built off-DOM and swapped in at once; live refreshes never rebuild the panel, so the
+// layout stays stable while a simulation runs and editing is not interrupted.
+const INSPECTOR_SECTIONS = [];
+function registerInspectorSection(spec) {
+  const i = INSPECTOR_SECTIONS.findIndex((s) => s.id === spec.id);
+  if (i >= 0) INSPECTOR_SECTIONS.splice(i, 1);
+  INSPECTOR_SECTIONS.push(spec);
+  INSPECTOR_SECTIONS.sort((x, y) => (x.order ?? 50) - (y.order ?? 50));
+}
+let insSeq = 0, insBusy = false, insView = null, insPending = null;   // insView: {id, a, secs, shared}
+const encId = (id) => encodeURIComponent(id);
+
 function select(id) { selectedId = id; inspectorDirty = false; showTab("inspector"); renderInspector(true); }
 async function renderInspector(force = false) {
   const el = $("#tab-inspector");
-  if (!selectedId) { el.innerHTML = '<p class="hint">Select an asset on the canvas.</p>'; return; }
-  if (!force && (inspectorDirty || el.contains(document.activeElement))) return;
+  if (!selectedId) { insView = null; insSeq++; el.dataset.assetId = ""; el.innerHTML = '<p class="hint">Select an asset on the canvas.</p>'; return; }
+  if (!force && insPending === selectedId) return;
+  if (force || !insView || insView.id !== selectedId) return fullInspectorRender(el);
+  return liveInspectorRefresh();
+}
+function sectionShell(spec, a, shared) {
+  const key = `ins:${spec.id}`;
+  const collapsed = spec.collapsible ? !(SECTION_OPEN[key] ?? !spec.collapsed) : false;
+  const title = h("h4", {}, typeof spec.title === "function" ? spec.title(a) : spec.title || "");
+  const sum = h("span", { class: "ins-sum" });
+  const acts = h("span", { class: "ins-actions" });
+  const body = h("div", { class: `ins-body ${spec.bodyClass || ""}` });
+  const el = h("section", { class: `ins-sec${collapsed ? " collapsed" : ""}${spec.collapsible ? " collapsible" : ""}`, "data-sec": spec.id },
+    h("header", {}, title, sum, acts), body);
+  for (const act of spec.actions?.(a, shared) || []) {
+    acts.append(h("button", { type: "button", class: `small${act.primary ? " primary" : ""}`, title: act.title || "",
+      onclick: (ev) => { ev.stopPropagation(); Promise.resolve(act.run(insView?.a || a, shared)).catch((e) => toast(e.message)); } }, act.label));
+  }
+  if (spec.collapsible) {
+    el.querySelector("header").addEventListener("click", (ev) => {
+      if (ev.target.closest("button, input, select, a")) return;
+      el.classList.toggle("collapsed");
+      SECTION_OPEN[key] = !el.classList.contains("collapsed");
+    });
+  }
+  const sec = { spec, el, body, sum, title };
+  sec.setSummary = (x) => { const html = spec.summary ? spec.summary(x, shared) || "" : ""; if (sum.innerHTML !== html) sum.innerHTML = html; };
+  sec.setSummary(a);
+  return sec;
+}
+async function fullInspectorRender(el) {
+  const tok = ++insSeq;
+  const id = selectedId;
+  insPending = id;
+  try { await buildInspector(el, tok, id); } finally { if (tok === insSeq) insPending = null; }
+}
+async function buildInspector(el, tok, id) {
   let a;
-  try { a = await api("GET", `/api/assets/${encodeURIComponent(selectedId)}`); }
-  catch (e) { el.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
-  if (!force && (inspectorDirty || el.contains(document.activeElement))) return;
-  const ops = await api("GET", `/api/assets/${encodeURIComponent(a.id)}/operational-history?limit=15`).catch(() => []);
-  const changes = await api("GET", `/api/config-changes?asset_id=${encodeURIComponent(a.id)}&limit=10`).catch(() => []);
-  const ctx = await loadCtx().catch(() => ({ types: [], recipes: [], orders: [] }));
-  const integ = await api("GET", "/api/integration").catch(() => null);
-  if (!force && (inspectorDirty || el.contains(document.activeElement))) return;
+  try { a = await api("GET", `/api/assets/${encId(id)}`); }
+  catch (e) { if (tok === insSeq) el.innerHTML = `<p class="hint">${esc(e.message)}</p>`; return; }
+  const [ctx, integ] = await Promise.all([loadCtx().catch(() => ({ types: [], recipes: [], orders: [] })),
+    api("GET", "/api/integration").catch(() => null)]);
+  if (tok !== insSeq) return;
+  const shared = { ctx, integ };
+  const root = h("div", { class: "inspector" });
+  const secs = INSPECTOR_SECTIONS.filter((s) => !s.kinds || s.kinds.includes(a.kind)).map((spec) => sectionShell(spec, a, shared));
+  secs.forEach((s) => root.append(s.el));
+  await Promise.all(secs.map((s) => Promise.resolve().then(() => s.spec.mount?.(a, s.body, shared, s))
+    .catch((e) => (s.body.innerHTML = `<p class="hint bad">${esc(e.message)}</p>`))));
+  if (tok !== insSeq) return;
   const scroll = el.dataset.assetId === a.id ? el.scrollTop : 0;
+  el.replaceChildren(root);
   el.dataset.assetId = a.id;
-  el.innerHTML = `
-    <div class="kv">
-      <div>ID</div><div>${esc(a.id)}</div>
-      <div>Kind</div><div>${esc(a.kind)}</div>
-      <div>State</div><div><span class="badge ${esc(a.state)}">${esc(a.state)}</span> ${esc(a.state_reason || "")}</div>
-      <div>Config version</div><div>${a.config_version}</div>
-    </div>
-    <div class="row"><input id="ins-name" value="${esc(a.name)}"><button id="ins-rename">Rename</button></div>
-    <div class="row">
-      <button data-cmd="start">Start</button><button data-cmd="stop">Stop</button>
-      <button data-cmd="fault">Inject fault</button><button data-cmd="restart">Restart</button>
-    </div>
-    ${a.kind !== "conveyor" ? `<div class="row"><button id="ins-copy" title="Ctrl+C">Copy</button><button id="ins-dup" title="Ctrl+D">Duplicate</button></div>` : ""}
-    ${a.kind === "conveyor" ? `<div class="kv"><div>From</div><div>${esc(a.ports?.source?.asset_id)} · ${esc(a.ports?.source?.port)}</div>
-      <div>To</div><div>${esc(a.ports?.target?.asset_id)} · ${esc(a.ports?.target?.port)}</div></div>` : ""}
-    <h4>Configuration <span class="hint">· applied changes are versioned</span></h4>
-    <div id="ins-form"></div>
-    <div class="row"><button id="ins-apply" class="primary">Apply changes</button><button id="ins-revert">Revert</button></div>
-    <details class="section" id="ins-raw" ${SECTION_OPEN.rawJson ? "open" : ""}><summary>Raw JSON (advanced)</summary>
-      <textarea id="ins-config" rows="10">${esc(JSON.stringify(a.config, null, 2))}</textarea>
-      <div class="row"><button id="ins-apply-json">Apply JSON</button></div></details>
-    ${a.kind === "sink" ? '<h4>Received products</h4><div class="row"><select id="sink-filter"><option value="">all</option><option value="completed=true">completed</option><option value="completed=false">stored</option><option value="defective=true">defective</option></select><button id="sink-list">List</button></div><div id="sink-products" class="log"></div>' : ""}
-    ${deviceApiHtml(a, integ)}
-    <div id="ins-industrial" class="industrial"></div>
-    <h4>Statistics</h4><div class="kv stats">${Object.entries(a.stats || {}).map(([k, v]) =>
-      `<div>${esc(k.replace(/_/g, " "))}</div><div>${esc(typeof v === "number" ? +v.toFixed(3) : showValue(v) || "–")}</div>`).join("")}</div>
-    <h4>Operational history (latest)</h4>
-    <table class="hist"><tr><th>state</th><th>start</th><th>end</th><th>reason</th></tr>
-      ${ops.slice().reverse().map((o) => `<tr><td>${esc(o.state)}</td><td>${fmt(o.start)}</td><td>${fmt(o.end)}</td><td>${esc(o.reason || "")}</td></tr>`).join("")}</table>
-    <h4>Configuration changes</h4>
-    ${changes.length ? changes.slice().reverse().map((c) => `<pre>t=${fmt(c.timestamp)} v${c.version}: ${esc(JSON.stringify(c.changes))}\n  (${esc(c.effective)})</pre>`).join("") : '<p class="hint">none</p>'}
-  `;
-  const form = buildForm(ASSET_SCHEMAS[a.kind] || [], a.config, ctx, ASSET_PREVIEWS[a.kind]);
-  $("#ins-form").append(form.el);
-  $("#ins-raw").addEventListener("toggle", () => (SECTION_OPEN.rawJson = $("#ins-raw").open));
-  $("#ins-api").addEventListener("toggle", () => (SECTION_OPEN.deviceApi = $("#ins-api").open));
-  $("#ins-api").addEventListener("click", (ev) => {
+  el.scrollTop = scroll;
+  insView = { id: a.id, a, secs, shared };
+}
+async function liveInspectorRefresh() {
+  if (insBusy || !insView) return;
+  insBusy = true;
+  const tok = insSeq, view = insView;
+  try {
+    const a = await api("GET", `/api/assets/${encId(view.id)}`);
+    if (tok !== insSeq) return;
+    const prev = view.a;
+    view.a = a;
+    await Promise.all(view.secs.map(async (s) => {
+      s.setSummary(a);
+      const t = typeof s.spec.title === "function" ? s.spec.title(a) : null;
+      if (t !== null && s.title.textContent !== t) s.title.textContent = t;
+      if (s.spec.refresh) await Promise.resolve(s.spec.refresh(a, s.body, view.shared, prev, s)).catch(() => {});
+    }));
+  } catch (e) { /* asset gone: refresh() deselects it */ }
+  finally { insBusy = false; }
+}
+const setHtml = (el, html) => { if (el && el.innerHTML !== html) el.innerHTML = html; };
+
+// ---- value formatting (compact, never widens the panel)
+function compactValue(v) {
+  if (v === null || v === undefined || v === "") return '<span class="muted">–</span>';
+  if (typeof v === "number") return esc(Number.isInteger(v) ? v : +v.toFixed(3));
+  if (typeof v === "boolean") return v ? "yes" : "no";
+  if (Array.isArray(v)) return `<span class="chip" title="${esc(JSON.stringify(v))}">${v.length} item${v.length === 1 ? "" : "s"}</span>`;
+  if (typeof v === "object") {
+    const n = Object.keys(v).length;
+    return `<span class="chip" title="${esc(JSON.stringify(v, null, 1))}">${n} field${n === 1 ? "" : "s"}</span>`;
+  }
+  return `<span class="trunc" title="${esc(v)}">${esc(v)}</span>`;
+}
+function cycleCard(c, now) {
+  if (!c) return '<div class="cycle-card idle"><span class="muted">No active cycle</span></div>';
+  const span = (c.scheduled_end ?? now) - c.started_at;
+  const p = span > 0 ? Math.max(0, Math.min(1, (now - c.started_at) / span)) : 0;
+  return `<div class="cycle-card"><div class="cycle-head"><span class="trunc" title="${esc(c.id)}"><b>${esc(c.id)}</b></span>
+      <span class="badge running">${esc(c.status)}</span></div>
+    <div class="bar"><div style="width:${(p * 100).toFixed(1)}%"></div></div>
+    <div class="cycle-meta"><span>lot <b class="trunc" title="${esc(c.lot_number)}">${esc(c.lot_number)}</b></span>
+      <span>t ${fmt(c.started_at)} → ${fmt(c.scheduled_end)}</span><span>${(c.input_ids || []).length} in</span>
+      ${c.recipe_id ? `<span>${esc(c.recipe_id)}</span>` : ""}</div></div>`;
+}
+function statsHtml(stats) {
+  const s = stats || {};
+  const hasCycle = "active_cycle" in s;
+  const rows = Object.entries(s).filter(([k]) => k !== "active_cycle")
+    .map(([k, v]) => `<div>${esc(k.replace(/_/g, " "))}</div><div>${compactValue(v)}</div>`).join("");
+  return `${hasCycle ? `<div class="sub">Active cycle</div>${cycleCard(s.active_cycle, state?.sim?.sim_time ?? 0)}` : ""}
+    <div class="kv stats">${rows || '<div class="muted">no statistics</div>'}</div>`;
+}
+
+// ---- configuration helpers
+function configPatch(a, next) {
+  const patch = {};
+  for (const [k, v] of Object.entries(next)) if (JSON.stringify(v) !== JSON.stringify(a.config[k])) patch[k] = v;
+  return patch;
+}
+async function applyConfigPatch(a, next) {
+  const patch = configPatch(a, next);
+  if (!Object.keys(patch).length) { toast("No changes", true); return null; }
+  const r = await api("PATCH", `/api/assets/${encId(a.id)}/config`, patch);
+  inspectorDirty = false;
+  toast(`Applied (v${r.version}) – effective: ${r.effective}`, true);
+  await refresh(); renderInspector(true);
+  return r;
+}
+const flatFields = (fields) => fields.flatMap((f) => (f.row ? f.fields : f.section ? flatFields(f.fields) : [f]));
+function sectionSummary(fields, cfg, ctx) {
+  return flatFields(fields).map((f) => {
+    const v = cfg[f.key];
+    let txt;
+    if (Array.isArray(v)) txt = `${v.length}`;
+    else if (v && typeof v === "object") txt = f.key === "speed_model" ? `${(v.points || []).length} pts` : "set";
+    else if (f.type === "select") {
+      const opts = typeof f.options === "function" ? f.options(ctx) : f.options || [];
+      const o = opts.find((x) => (Array.isArray(x) ? x[0] : x) === v);
+      txt = o ? (Array.isArray(o) ? o[1] : o) : showValue(v);
+    } else txt = showValue(v);
+    return `${f.label || f.key}: ${txt === "" ? "–" : txt}`;
+  }).join(" · ");
+}
+function openConfigSectionDialog(a, sec, ctx) {
+  openFormDialog({ title: `${a.name} · ${sec.section}`, subtitle: "Changes are applied to the running asset and versioned.",
+    fields: sec.fields, value: a.config, ctx, submitLabel: "Apply",
+    onSubmit: async (v) => { await applyConfigPatch(a, v); } });
+}
+function openRawConfigDialog(a) {
+  openJsonDialog({ title: `${a.name} · configuration (JSON)`, value: a.config, submitLabel: "Apply",
+    subtitle: "Advanced: edit the complete configuration. Only changed keys are sent (PATCH) and versioned.",
+    onSubmit: async (v) => {
+      if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("configuration must be a JSON object");
+      await applyConfigPatch(a, v);
+    } });
+}
+function openDeviceApiDialog(a, integ) {
+  $("#modal-content").innerHTML = `<div class="dialog wide"><h3>API for ${esc(a.name)}</h3>${deviceApiHtml(a, integ)}
+    <div class="row end"><button type="button" onclick="closeModal()">Close</button></div></div>`;
+  $("#modal-content").querySelector(".dialog").addEventListener("click", (ev) => {
     const b = ev.target.closest("button[data-copy]"); if (!b) return;
     navigator.clipboard.writeText(b.dataset.copy).then(() => toast("Copied", true), () => toast("Copy failed"));
   });
-  if (typeof renderIndustrialPanel === "function") {
-    await renderIndustrialPanel(a, $("#ins-industrial")).catch((e) => ($("#ins-industrial").innerHTML = `<p class="hint">${esc(e.message)}</p>`));
-  }
-  el.scrollTop = scroll;
-  for (const ev of ["input", "change"]) {
-    $("#ins-form").addEventListener(ev, () => (inspectorDirty = true));
-    $("#ins-config").addEventListener(ev, () => (inspectorDirty = true));
-  }
-  if ($("#ins-copy")) {
-    $("#ins-copy").onclick = () => copyAsset(a.id);
-    $("#ins-dup").onclick = () => { copyAsset(a.id); pasteAsset(); };
-  }
-  $("#ins-revert").onclick = () => { inspectorDirty = false; renderInspector(true); };
-  $("#ins-rename").onclick = () => act(() => api("POST", `/api/assets/${encodeURIComponent(a.id)}/rename`, { name: $("#ins-name").value }), "Renamed");
-  el.querySelectorAll("button[data-cmd]").forEach((b) => (b.onclick = () =>
-    act(() => api("POST", `/api/assets/${encodeURIComponent(a.id)}/commands`, { command: b.dataset.cmd }), `${b.dataset.cmd} sent`)));
-  const applyConfig = async (next) => {
-    const patch = {};
-    for (const [k, v] of Object.entries(next)) if (JSON.stringify(v) !== JSON.stringify(a.config[k])) patch[k] = v;
-    if (!Object.keys(patch).length) return toast("No changes", true);
-    const r = await act(() => api("PATCH", `/api/assets/${encodeURIComponent(a.id)}/config`, patch));
-    if (r) { inspectorDirty = false; toast(`Applied (v${r.version}) – effective: ${r.effective}`, true); renderInspector(true); }
-  };
-  $("#ins-apply").onclick = () => applyConfig(form.get());
-  $("#ins-apply-json").onclick = () => {
-    let next;
-    try { next = JSON.parse($("#ins-config").value); } catch (e) { return toast("Invalid JSON: " + e.message); }
-    applyConfig(next);
-  };
-  if (a.kind === "sink") {
-    $("#sink-list").onclick = async () => {
-      const q = $("#sink-filter").value;
-      const ps = await api("GET", `/api/assets/${encodeURIComponent(a.id)}/products?limit=200${q ? "&" + q : ""}`).catch((e) => toast(e.message));
-      $("#sink-products").innerHTML = (ps || []).map(productRow).join("") || '<p class="hint">none</p>';
-    };
-  }
+  $("#modal").classList.remove("hidden");
 }
+
+// ---- built-in sections
+registerInspectorSection({
+  id: "overview", order: 0, title: (a) => a.name,
+  summary: (a) => `<span class="badge ${esc(a.state)}">${esc(a.state)}</span>`,
+  mount(a, body) {
+    body.innerHTML = `<div class="kv">
+        <div>ID</div><div><code class="trunc" title="${esc(a.id)}">${esc(a.id)}</code></div>
+        <div>Kind</div><div>${esc(a.kind)}</div>
+        <div>State</div><div class="ins-state"></div>
+        <div>Config version</div><div class="ins-ver"></div>
+        ${a.kind === "conveyor" ? `<div>From</div><div class="trunc">${esc(a.ports?.source?.asset_id)} · ${esc(a.ports?.source?.port)}</div>
+          <div>To</div><div class="trunc">${esc(a.ports?.target?.asset_id)} · ${esc(a.ports?.target?.port)}</div>` : ""}
+      </div>
+      <div class="row"><input class="ins-name" value="${esc(a.name)}" aria-label="Name"><button data-x="rename">Rename</button></div>
+      <div class="row">
+        <button data-cmd="start">Start</button><button data-cmd="stop">Stop</button>
+        <button data-cmd="fault">Inject fault</button><button data-cmd="restart">Restart</button>
+        ${a.kind !== "conveyor" ? `<button data-x="copy" title="Ctrl+C">Copy</button><button data-x="dup" title="Ctrl+D">Duplicate</button>` : ""}
+      </div>`;
+    this.refresh(a, body);
+    body.onclick = (ev) => {
+      const b = ev.target.closest("button"); if (!b) return;
+      const cur = insView?.a || a;
+      if (b.dataset.cmd) return act(() => api("POST", `/api/assets/${encId(cur.id)}/commands`, { command: b.dataset.cmd }), `${b.dataset.cmd} sent`);
+      if (b.dataset.x === "rename") return act(async () => {
+        await api("POST", `/api/assets/${encId(cur.id)}/rename`, { name: body.querySelector(".ins-name").value });
+        renderInspector(true);
+      }, "Renamed");
+      if (b.dataset.x === "copy") return copyAsset(cur.id);
+      if (b.dataset.x === "dup") { copyAsset(cur.id); pasteAsset(); }
+    };
+  },
+  refresh(a, body) {
+    setHtml(body.querySelector(".ins-state"), `<span class="badge ${esc(a.state)}">${esc(a.state)}</span>
+      ${a.state_reason ? `<span class="trunc muted" title="${esc(a.state_reason)}">${esc(a.state_reason)}</span>` : ""}`);
+    setHtml(body.querySelector(".ins-ver"), String(a.config_version));
+  },
+});
+
+registerInspectorSection({
+  id: "config", order: 10, title: "Configuration", summary: () => '<span class="hint">versioned</span>',
+  actions: (a) => [{ label: "{ } JSON…", title: "Advanced: edit the raw configuration as JSON", run: (cur) => openRawConfigDialog(cur) }],
+  mount(a, body, shared, sec) {
+    const schema = ASSET_SCHEMAS[a.kind] || [];
+    const basic = schema.filter((f) => !f.section), advanced = schema.filter((f) => f.section);
+    const form = buildForm(basic, a.config, shared.ctx, ASSET_PREVIEWS[a.kind]);
+    const notice = h("div", { class: "notice hidden" }, "Configuration changed elsewhere. ", h("button", { type: "button", class: "small",
+      onclick: () => { inspectorDirty = false; renderInspector(true); } }, "Reload"));
+    const adv = h("div", { class: "adv-list" }, advanced.map((s) => h("div", { class: "adv-row" },
+      h("span", { class: "adv-name" }, s.section),
+      h("span", { class: "adv-sum", title: sectionSummary(s.fields, a.config, shared.ctx) }, sectionSummary(s.fields, a.config, shared.ctx)),
+      h("button", { type: "button", class: "small", onclick: () => openConfigSectionDialog(insView?.a || a, s, shared.ctx) }, "Edit…"))));
+    const applyBtn = h("button", { type: "button", class: "primary", onclick: () => applyConfigPatch(insView?.a || a, form.get()).catch((e) => toast(e.message)) }, "Apply changes");
+    const revert = h("button", { type: "button", onclick: () => { inspectorDirty = false; renderInspector(true); } }, "Revert");
+    body.replaceChildren(notice, form.el, h("div", { class: "row" }, applyBtn, revert), advanced.length ? adv : "");
+    for (const ev of ["input", "change"]) form.el.addEventListener(ev, () => (inspectorDirty = true));
+    sec.version = a.config_version;
+    sec.notice = notice;
+  },
+  refresh(a, body, shared, prev, sec) {
+    if (a.config_version === sec.version) return;
+    if (inspectorDirty || body.contains(document.activeElement)) { sec.notice.classList.remove("hidden"); return; }
+    this.mount(a, body, shared, sec);
+  },
+});
+
+registerInspectorSection({
+  id: "sink-products", order: 35, kinds: ["sink"], title: "Received products", collapsible: true, collapsed: true,
+  summary: (a) => `<span class="muted">${a.counts?.received ?? 0} received</span>`,
+  mount(a, body) {
+    body.innerHTML = `<div class="row"><select class="sink-filter"><option value="">all</option><option value="completed=true">completed</option>
+      <option value="completed=false">stored</option><option value="defective=true">defective</option></select><button class="sink-list">List</button></div>
+      <div class="log sink-products"></div>`;
+    body.querySelector(".sink-list").onclick = async () => {
+      const q = body.querySelector(".sink-filter").value;
+      const ps = await api("GET", `/api/assets/${encId(a.id)}/products?limit=200${q ? "&" + q : ""}`).catch((e) => toast(e.message));
+      body.querySelector(".sink-products").innerHTML = (ps || []).map(productRow).join("") || '<p class="hint">none</p>';
+    };
+  },
+});
+
+registerInspectorSection({
+  id: "stats", order: 40, title: "Statistics", collapsible: true,
+  mount(a, body) { body.innerHTML = statsHtml(a.stats); },
+  refresh(a, body) { setHtml(body, statsHtml(a.stats)); },
+});
+
+async function opsHtml(a) {
+  const ops = await api("GET", `/api/assets/${encId(a.id)}/operational-history?limit=15`).catch(() => []);
+  return `<table class="hist fixed"><colgroup><col style="width:28%"><col style="width:16%"><col style="width:16%"><col></colgroup>
+    <tr><th>state</th><th>start</th><th>end</th><th>reason</th></tr>
+    ${ops.slice().reverse().map((o) => `<tr><td>${esc(o.state)}</td><td>${fmt(o.start)}</td><td>${fmt(o.end)}</td>
+      <td class="trunc" title="${esc(o.reason || "")}">${esc(o.reason || "")}</td></tr>`).join("")}</table>`;
+}
+registerInspectorSection({
+  id: "ops", order: 50, title: "Operational history", collapsible: true, collapsed: true,
+  async mount(a, body) { body.innerHTML = await opsHtml(a); },
+  async refresh(a, body, shared, prev, sec) { if (!sec.el.classList.contains("collapsed")) setHtml(body, await opsHtml(a)); },
+});
+
+async function changesHtml(a) {
+  const changes = await api("GET", `/api/config-changes?asset_id=${encId(a.id)}&limit=10`).catch(() => []);
+  return changes.length ? changes.slice().reverse().map((c) => `<div class="change"><b>v${c.version}</b> t=${fmt(c.timestamp)}
+      ${Object.keys(c.changes || {}).map((k) => `<span class="chip" title="${esc(JSON.stringify(c.changes[k]))}">${esc(k)}</span>`).join("")}
+      <div class="hint">${esc(c.effective || "")}</div></div>`).join("") : '<p class="hint">none</p>';
+}
+registerInspectorSection({
+  id: "changes", order: 60, title: "Configuration changes", collapsible: true, collapsed: true,
+  summary: (a) => `<span class="muted">v${a.config_version}</span>`,
+  async mount(a, body, shared, sec) { body.innerHTML = await changesHtml(a); sec.version = a.config_version; },
+  async refresh(a, body, shared, prev, sec) {
+    if (a.config_version !== sec.version) { sec.version = a.config_version; setHtml(body, await changesHtml(a)); }
+  },
+});
+
+registerInspectorSection({
+  id: "api", order: 70, title: "API for this device",
+  actions: () => [{ label: "Details…", title: "REST endpoints, curl commands and broker topics", run: (cur, shared) => openDeviceApiDialog(cur, shared.integ) }],
+  mount(a, body) {
+    body.innerHTML = `<p class="hint">REST <code class="trunc">/api/assets/${esc(encId(a.id))}</code> · interactive reference at
+      <a href="/docs" target="_blank" rel="noopener">/docs</a></p>`;
+  },
+});
 
 // ------------------------------------------------------------------ DPP viewer
 function productRow(p) {
@@ -590,18 +840,86 @@ $("#btn-stop").onclick = () => simCmd("stop");
 $("#btn-reset").onclick = () => { eventBuffer = []; lastEventSeq = 0; simCmd("reset"); };
 $("#btn-step").onclick = () => simCmd("step", { seconds: Number($("#step-seconds").value) });
 $("#accel").onchange = () => simCmd("acceleration", { factor: Number($("#accel").value) });
+// ---- scenario files: New (empty plant, keeps catalogues), Save, Save as, Rename
+let currentScenario = { id: null, name: "", saved: false };
+async function refreshScenarioInfo() {
+  const [cur, scs] = await Promise.all([api("GET", "/api/scenarios/current").catch(() => null), api("GET", "/api/scenarios").catch(() => [])]);
+  if (cur) currentScenario = cur;
+  const sel = $("#scenario-select"), keep = sel.value;
+  sel.innerHTML = scs.map((s) => `<option value="${esc(s.id)}">${esc(s.name || s.id)} (${esc(s.id)})</option>`).join("");
+  sel.value = scs.some((s) => s.id === currentScenario.id) ? currentScenario.id : keep;
+  $("#scenario-name").innerHTML = `<b>${esc(currentScenario.name || "Untitled")}</b> <span class="muted">${
+    currentScenario.id ? esc(currentScenario.id) + ".json" : "unsaved"}</span>`;
+  $("#scenario-name").title = currentScenario.description || "Current scenario";
+}
+const resetView = () => { eventBuffer = []; lastEventSeq = 0; select(null); needsFit = true; userView = false; view = { ox: 0, oy: 0, s: 1 }; };
+function wireSlug(box) {
+  const [nameIn, idIn] = box.querySelectorAll(".form > .f input");
+  let touched = false;
+  idIn.addEventListener("input", () => (touched = idIn.value !== ""));
+  nameIn.addEventListener("input", () => { if (!touched) idIn.value = slug(nameIn.value).replace(/-/g, "_"); });
+}
+$("#btn-new").onclick = () => openFormDialog({
+  title: "New scenario", submitLabel: "Create",
+  subtitle: "Starts a fresh, empty plant in a new scenario file. The current plant is not saved automatically.",
+  fields: [{ key: "name", label: "Name", type: "text", placeholder: "e.g. Rolling mill line 2" },
+    { key: "id", label: "File", type: "text", placeholder: "auto from name", help: "scenarios/<file>.json · letters, digits, - and _" },
+    { key: "description", label: "Description", type: "text", multiline: true },
+    { key: "seed", label: "Random seed", type: "number", int: true, help: "Empty = keep the current seed" },
+    { key: "keep_catalog", label: "Catalogues", type: "bool", checkLabel: "keep product types, recipes and production orders" },
+    { key: "keep_asset_types", label: "Asset types", type: "bool", checkLabel: "keep asset types (templates)" }],
+  value: { name: "", keep_catalog: true, keep_asset_types: true }, ctx: {},
+  onBuilt: (f, box) => wireSlug(box),
+  onSubmit: async (v) => {
+    if (!v.name) throw new Error("name is required");
+    const body = { ...v, id: v.id || undefined };
+    if (body.seed === null) delete body.seed;
+    const r = await api("POST", "/api/scenarios", body);
+    resetView(); await refresh(); await refreshScenarioInfo(); if (typeof renderAssetTypes === "function") renderAssetTypes();
+    toast(`Scenario '${r.name}' created (${r.id}.json): add assets from the palette`, true);
+  },
+});
+function saveAsDialog() {
+  openFormDialog({
+    title: "Save scenario as", submitLabel: "Save",
+    fields: [{ key: "name", label: "Name", type: "text" },
+      { key: "id", label: "File", type: "text", placeholder: "auto from name", help: "scenarios/<file>.json" },
+      { key: "overwrite", label: "", type: "bool", checkLabel: "overwrite an existing file" }],
+    value: { name: currentScenario.name, id: "", overwrite: false }, ctx: {},
+    onBuilt: (f, box) => wireSlug(box),
+    onSubmit: async (v) => {
+      const id = v.id || slug(v.name || "").replace(/-/g, "_");
+      if (!id) throw new Error("name or file is required");
+      await api("PUT", `/api/scenarios/${encodeURIComponent(id)}?overwrite=${!!v.overwrite}`, { name: v.name || undefined });
+      await refreshScenarioInfo(); toast(`Saved to ${id}.json`, true);
+    },
+  });
+}
+$("#btn-save").onclick = () => {
+  if (!currentScenario.id) return saveAsDialog();
+  act(async () => { await api("PUT", `/api/scenarios/${encodeURIComponent(currentScenario.id)}`); await refreshScenarioInfo(); },
+    `Saved ${currentScenario.id}.json`);
+};
+$("#btn-save-as").onclick = saveAsDialog;
+$("#btn-rename").onclick = () => {
+  if (!currentScenario.id) return saveAsDialog();
+  openFormDialog({
+    title: "Rename scenario", submitLabel: "Rename",
+    subtitle: "Changes the display name and/or the file name. Unsaved changes to the plant are not written.",
+    fields: [{ key: "name", label: "Name", type: "text" }, { key: "new_id", label: "File", type: "text", help: "scenarios/<file>.json" }],
+    value: { name: currentScenario.name, new_id: currentScenario.id }, ctx: {},
+    onSubmit: async (v) => {
+      const r = await api("POST", `/api/scenarios/${encodeURIComponent(currentScenario.id)}/rename`,
+        { name: v.name || undefined, new_id: v.new_id || undefined });
+      await refreshScenarioInfo(); toast(`Renamed to '${r.name}' (${r.id}.json)`, true);
+    },
+  });
+};
 $("#btn-load-scenario").onclick = () => act(async () => {
   await api("POST", `/api/scenarios/${encodeURIComponent($("#scenario-select").value)}/load`);
   eventBuffer = []; lastEventSeq = 0; select(null); needsFit = true;
+  await refreshScenarioInfo();
 }, "Scenario loaded");
-$("#btn-new").onclick = () => {
-  if (!confirm("Start an empty plant? The current network is discarded (catalog is kept). Export first if you need it.")) return;
-  act(async () => {
-    const data = await api("GET", "/api/scenario");
-    await api("POST", "/api/scenario", { ...data, name: "Untitled plant", assets: [] });
-    eventBuffer = []; lastEventSeq = 0; select(null); needsFit = true; userView = false; view = { ox: 0, oy: 0, s: 1 };
-  }, "Empty plant created: add assets from the palette");
-};
 $("#btn-export").onclick = async () => {
   const data = await api("GET", "/api/scenario");
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -610,7 +928,8 @@ $("#btn-export").onclick = async () => {
 $("#file-import").onchange = async (ev) => {
   const f = ev.target.files[0]; if (!f) return;
   let data; try { data = JSON.parse(await f.text()); } catch (e) { return toast("Invalid JSON file"); }
-  act(async () => { await api("POST", "/api/scenario", data); eventBuffer = []; lastEventSeq = 0; select(null); needsFit = true; }, "Scenario imported");
+  act(async () => { await api("POST", "/api/scenario", data); eventBuffer = []; lastEventSeq = 0; select(null); needsFit = true; await refreshScenarioInfo(); },
+    "Scenario imported (unsaved: use Save as to keep it)");
   ev.target.value = "";
 };
 $("#btn-ckpt-save").onclick = () => act(() => api("POST", `/api/checkpoints/${encodeURIComponent($("#ckpt-name").value)}`), "Checkpoint saved");
@@ -644,8 +963,7 @@ async function slowRefresh() {
   if ($("#tab-inspector").classList.contains("active")) renderInspector(false);
 }
 async function init() {
-  const scs = await api("GET", "/api/scenarios").catch(() => []);
-  $("#scenario-select").innerHTML = scs.map((s) => `<option value="${esc(s.id)}">${esc(s.name || s.id)}</option>`).join("");
+  await refreshScenarioInfo();
   resize(); window.addEventListener("resize", resize);
   // Layout can settle after the first fit (fonts, side panels): refit unless the user moved the view.
   new ResizeObserver(() => { resize(); if (!userView) needsFit = true; }).observe(canvas);

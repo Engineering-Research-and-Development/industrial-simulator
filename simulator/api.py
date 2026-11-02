@@ -8,6 +8,7 @@ translates engine errors into HTTP status codes.
 from __future__ import annotations
 
 import itertools
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -18,14 +19,16 @@ from fastapi.staticfiles import StaticFiles
 
 from .controller import SimulationController
 from .engine import Simulation
-from .errors import NotFoundError, SimulatorError, ValidationError
+from .errors import ConflictError, NotFoundError, SimulatorError, ValidationError
+from .industrial.asset_types import TYPE_KINDS
 from .industrial.datasets import DATASETS
 from .industrial.ingestion import ingest
 from .industrial.mqtt import MqttIngestor
 from .industrial.units import known_units
 from .integration import IntegrationBridge, create_publisher
 from .scenario import (export_scenario, list_builtin_scenarios, list_checkpoints, load_checkpoint, load_scenario,
-                       read_builtin_scenario, save_checkpoint)
+                       new_scenario, read_builtin_scenario, rename_scenario_file, save_checkpoint, scenario_exists,
+                       write_scenario)
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -34,10 +37,14 @@ class SimulationService:
     """Owns the controller, the active simulation and the optional broker bridge."""
 
     def __init__(self, sim: Simulation | None = None, *, checkpoint_dir: Path | None = None,
-                 background: bool = True, mqtt_client_factory=None) -> None:
+                 background: bool = True, mqtt_client_factory=None, scenario_dir: Path | None = None,
+                 scenario_id: str | None = None) -> None:
         self.controller = SimulationController(sim or Simulation(seed=42))
+        self.sim.industrial.ensure_default_types()
         self.bridge: IntegrationBridge | None = None
         self.checkpoint_dir = checkpoint_dir
+        self.scenario_dir = scenario_dir
+        self.scenario_id = scenario_id  # scenario file backing the current plant (None = unsaved)
         self.background = background
         self._metric_seq = itertools.count(1)
         self._last_metrics_wall = 0.0
@@ -73,6 +80,8 @@ class SimulationService:
                 self.sim.listeners.remove(self.bridge)
             sim.listeners.append(self.bridge)
         self.controller.replace_simulation(sim, status)
+        with self.controller.lock:
+            sim.industrial.ensure_default_types()
 
     def enable_integration(self, adapter: str, options: dict | None, topic_prefix: str,
                            categories: list[str] | None) -> dict:
@@ -102,6 +111,13 @@ def _int(value: Any, name: str) -> int:
         return int(value)
     except (TypeError, ValueError):
         raise ValidationError(f"'{name}' must be an integer") from None
+
+
+def slug_id(name: Any) -> str:
+    if not isinstance(name, str) or not name.strip():
+        raise ValidationError("scenario name must be a non-empty string")
+    s = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")[:64]
+    return s or "scenario"
 
 
 def create_app(service: SimulationService | None = None) -> FastAPI:
@@ -270,20 +286,32 @@ def create_app(service: SimulationService | None = None) -> FastAPI:
     def create_asset(payload: Any = Body(...)):
         d = body_dict(payload)
         with lock:
-            if d.get("kind") == "conveyor":
-                a = svc.sim.add_conveyor(d.get("name", ""), d.get("source"), d.get("target"), d.get("config") or {},
-                                         asset_id=d.get("id"), position=d.get("position"))
-            else:
-                a = svc.sim.add_asset(d.get("kind"), d.get("name", ""), d.get("config") or {},
-                                      asset_id=d.get("id"), position=d.get("position"))
-            return a.snapshot()
+            return create_typed_asset(d.get("kind"), d.get("name", ""), d).snapshot()
 
     @app.post("/api/connections", status_code=201)
     def connect(payload: Any = Body(...)):
         d = body_dict(payload)
         with lock:
-            return svc.sim.add_conveyor(d.get("name") or "Conveyor", d.get("source"), d.get("target"),
-                                        d.get("config") or {}, asset_id=d.get("id")).snapshot()
+            return create_typed_asset("conveyor", d.get("name") or "Conveyor", {**d, "position": None}).snapshot()
+
+    def create_typed_asset(kind: Any, name: str, d: dict):
+        """Create an asset bound to ``type_id`` – by default the per-kind default asset type.
+
+        ``"type_id": null`` creates an unbound asset. Instance config overrides the type template."""
+        hub = svc.sim.industrial
+        type_id = d.get("type_id", hub.default_type_id(kind) if isinstance(kind, str) else None)
+        if type_id is None or kind not in TYPE_KINDS:
+            if kind == "conveyor":
+                return svc.sim.add_conveyor(name, d.get("source"), d.get("target"), d.get("config") or {},
+                                            asset_id=d.get("id"), position=d.get("position"))
+            return svc.sim.add_asset(kind, name, d.get("config") or {}, asset_id=d.get("id"), position=d.get("position"))
+        if type_id == hub.default_type_id(kind):
+            hub.ensure_default_types()
+        t = hub.get_type(type_id)
+        if t.kind != kind:
+            raise ValidationError(f"asset type '{type_id}' is for {t.kind}s, not {kind}s")
+        return hub.deploy(type_id, name, config=d.get("config") or {}, asset_id=d.get("id"),
+                          position=d.get("position"), source=d.get("source"), target=d.get("target"))
 
     @app.get("/api/assets/{asset_id}")
     def get_asset(asset_id: str):
@@ -405,17 +433,84 @@ def create_app(service: SimulationService | None = None) -> FastAPI:
         with lock:
             sim = load_scenario(body_dict(payload))
             svc.install_simulation(sim, "idle")
+            svc.scenario_id = None
             return {"ok": True, "name": sim.name, "assets": len(sim.assets)}
 
     @app.get("/api/scenarios")
     def scenarios():
-        return list_builtin_scenarios()
+        return list_builtin_scenarios(svc.scenario_dir)
+
+    def current_info() -> dict:
+        return {"id": svc.scenario_id, "name": svc.sim.name, "description": getattr(svc.sim, "description", ""),
+                "saved": svc.scenario_id is not None and scenario_exists(svc.scenario_id, svc.scenario_dir)}
+
+    @app.get("/api/scenarios/current")
+    def scenario_current():
+        with lock:
+            return current_info()
+
+    @app.post("/api/scenarios", status_code=201)
+    def scenario_create(payload: Any = Body(...)):
+        """New empty plant: keeps the catalogues (product types, recipes, orders, asset types), writes a new file."""
+        d = body_dict(payload)
+        name = d.get("name")
+        sid = d.get("id") or slug_id(name)
+        seed = d.get("seed")
+        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+            raise ValidationError("seed must be an integer or null")
+        with lock:
+            if scenario_exists(sid, svc.scenario_dir):
+                raise ConflictError(f"scenario '{sid}' already exists")
+            sim = new_scenario(svc.sim, name=name, description=d.get("description", ""), seed=seed,
+                               keep_catalog=bool(d.get("keep_catalog", True)),
+                               keep_asset_types=bool(d.get("keep_asset_types", True)))
+            write_scenario(export_scenario(sim), sid, svc.scenario_dir, overwrite=False)
+            svc.install_simulation(sim, "idle")
+            svc.scenario_id = sid
+            return current_info()
+
+    @app.put("/api/scenarios/{scenario_id}")
+    def scenario_save(scenario_id: str, payload: Any = Body(None), overwrite: bool = False):
+        """Save the current plant to ``scenario_id`` (Save when it is the current file, Save As otherwise)."""
+        d = body_dict(payload) if payload is not None else {}
+        with lock:
+            if scenario_id != svc.scenario_id and scenario_exists(scenario_id, svc.scenario_dir) and not overwrite:
+                raise ConflictError(f"scenario '{scenario_id}' already exists (use overwrite=true)")
+            if d.get("name") is not None:
+                if not isinstance(d["name"], str) or not d["name"].strip():
+                    raise ValidationError("scenario name must be a non-empty string")
+                svc.sim.name = d["name"].strip()
+            if d.get("description") is not None:
+                svc.sim.description = str(d["description"])
+            write_scenario(export_scenario(svc.sim), scenario_id, svc.scenario_dir)
+            svc.scenario_id = scenario_id
+            return current_info()
+
+    @app.post("/api/scenarios/{scenario_id}/rename")
+    def scenario_rename(scenario_id: str, payload: Any = Body(...)):
+        """Rename a scenario file (``new_id``) and/or its display name (``name``)."""
+        d = body_dict(payload)
+        new_id, name = d.get("new_id") or scenario_id, d.get("name")
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            raise ValidationError("scenario name must be a non-empty string")
+        with lock:
+            doc = read_builtin_scenario(scenario_id, svc.scenario_dir)
+            rename_scenario_file(scenario_id, new_id, svc.scenario_dir)
+            if name is not None:
+                doc["name"] = name.strip()
+                write_scenario(doc, new_id, svc.scenario_dir)
+            if svc.scenario_id == scenario_id:
+                svc.scenario_id = new_id
+                if name is not None:
+                    svc.sim.name = name.strip()
+            return {"id": new_id, "name": doc.get("name", new_id), "current": current_info()}
 
     @app.post("/api/scenarios/{scenario_id}/load")
     def load_builtin(scenario_id: str):
         with lock:
-            sim = load_scenario(read_builtin_scenario(scenario_id))
+            sim = load_scenario(read_builtin_scenario(scenario_id, svc.scenario_dir))
             svc.install_simulation(sim, "idle")
+            svc.scenario_id = scenario_id
             return {"ok": True, "name": sim.name, "assets": len(sim.assets)}
 
     @app.get("/api/checkpoints")

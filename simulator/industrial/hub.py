@@ -1486,6 +1486,29 @@ class IndustrialHub:
             self._validate_type(t)
             self.asset_types[t.id] = t
 
+    # ================================================================== default asset types
+    @staticmethod
+    def default_type_id(kind: str) -> str:
+        return f"{DEFAULT_TYPE_PREFIX}{kind}"
+
+    def ensure_default_types(self) -> list[str]:
+        """Create the per-kind default asset types (empty template) when missing; returns the created ids."""
+        created = []
+        for kind in TYPE_KINDS:
+            tid = self.default_type_id(kind)
+            if tid in self.asset_types:
+                continue
+            self.asset_types[tid] = AssetType(
+                id=tid, name=f"Default {kind}", kind=kind, version=1,
+                description=f"Default asset type assigned to new {kind}s. Add parameters, sensors, conditions and "
+                            "behaviors here to apply them to every bound instance.",
+                updated_at=self.sim.now, changelog=[{"version": 1, "time": self.sim.now, "summary": "created (default)"}])
+            created.append(tid)
+        return created
+
+
+DEFAULT_TYPE_PREFIX = "default-"
+
 
 # --------------------------------------------------------------------------- helpers
 

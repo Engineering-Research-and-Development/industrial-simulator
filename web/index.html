@@ -3,15 +3,22 @@
 <head>
   <meta charset="utf-8">
   <title>Industrial Digital Twin Simulator</title>
-  <link rel="stylesheet" href="/static/style.css?v=9">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
 <header id="toolbar">
   <strong class="brand">Digital Twin Simulator</strong>
   <span class="group">
-    <select id="scenario-select" title="Built-in scenarios"></select>
+    <span id="scenario-name" class="scenario-name" title="Current scenario">–</span>
+    <button id="btn-new" title="New scenario file: empty plant, keeps your catalogues">New…</button>
+    <button id="btn-save" title="Save the current plant to its scenario file">Save</button>
+    <button id="btn-save-as" title="Save as a new scenario file">Save as…</button>
+    <button id="btn-rename" title="Rename the current scenario (name and file)">Rename…</button>
+  </span>
+  <span class="group">
+    <select id="scenario-select" title="Scenario files"></select>
     <button id="btn-load-scenario">Load</button>
-    <button id="btn-new" title="Empty plant, keep catalog">New</button>
     <button id="btn-export">Export JSON</button>
     <label class="file-btn">Import JSON<input type="file" id="file-import" accept=".json" hidden></label>
     <a class="file-btn" href="/docs" target="_blank" rel="noopener" title="Interactive REST API documentation (OpenAPI)">API docs</a>
@@ -157,8 +164,8 @@
     <div id="modal-content"></div>
   </div>
 </div>
-<script src="/static/forms.js?v=9"></script>
-<script src="/static/app.js?v=9"></script>
-<script src="/static/industrial.js?v=9"></script>
+<script src="/static/forms.js?v=10"></script>
+<script src="/static/app.js?v=10"></script>
+<script src="/static/industrial.js?v=10"></script>
 </body>
 </html>

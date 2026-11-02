@@ -41,7 +41,9 @@ def step(c, seconds):
 def test_asset_type_endpoints(client):
     c = client
     types = c.get("/api/asset-types").json()
-    assert [t["id"] for t in types] == ["furnace"] and types[0]["instances"] == ["t"]
+    assert [t["id"] for t in types if not t["id"].startswith("default-")] == ["furnace"] and types[0]["instances"] == ["t"]
+    assert {t["id"] for t in types if t["id"].startswith("default-")} == {
+        f"default-{k}" for k in ("producer", "transformer", "conveyor", "splitter", "sink")}
     r = c.post("/api/asset-types", json={"id": "bad", "name": "x", "kind": "rocket"})
     assert r.status_code == 422
     r = c.post("/api/asset-types/furnace/duplicate", json={"id": "furnace2", "name": "Furnace 2"})

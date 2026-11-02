@@ -27,6 +27,7 @@ Listener = Callable[[str, dict], None]
 class Simulation:
     def __init__(self, seed: int | None = None, *, event_log_limit: int | None = None, name: str = "untitled") -> None:
         self.name = name
+        self.description = ""
         self.seed = seed
         self.now = 0.0
         self.started = False

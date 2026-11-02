@@ -33,6 +33,9 @@ flowchart LR
 | `industrial/mqtt.py` | MQTT subscriber feeding the ingestion layer (injectable client factory) |
 | `industrial/datasets.py` | Continuous collector, collection sessions, dataset materialisation and CSV/JSONL/ZIP exporters |
 | `industrial/units.py` | Unit conversion table used for ingested measurements |
+| `web/app.js` | Canvas editor (nodes, conveyors, collision-free labels), toolbar and scenario files, inspector section registry, tabs |
+| `web/forms.js` | Declarative form builder (fields, row widgets, previews) and form dialogs |
+| `web/industrial.js` | Industrial-profile inspector section, asset-type form and JSON editors, datasets and ingestion tabs |
 
 The engine knows nothing about the UI, HTTP or brokers. Everything outside it observes the engine
 through listeners (`sim.listeners`, called with `(channel, payload)`) or queries.
@@ -147,6 +150,13 @@ through listeners (`sim.listeners`, called with `(channel, payload)`) or queries
 * **Scenario JSON** (`format: industrial-sim-scenario/v1`): catalog, assets, configs, positions and
   connections, plus asset types, instance bindings, sync settings and dataset definitions. It holds no runtime state. On import, everything is validated before replacing the
   current network.
+* **Scenario files** live in `scenarios/` (`SimulationService(scenario_dir, scenario_id)`). The service
+  tracks the current file id (`None` after an import or before the first save). `POST /api/scenarios`
+  writes a new file holding an empty plant; the product catalogue and asset types are copied unless
+  `keep_catalog` / `keep_asset_types` are false. `PUT /api/scenarios/{id}` saves (409 unless
+  `overwrite=true` or `id` is the current file), and `POST /api/scenarios/{id}/rename` renames the
+  file and/or the display name. File ids are validated with the same pattern as checkpoint names.
+  The scenario `description` is exported and loaded with the definition.
 * **Checkpoints** pickle the whole `Simulation` (scheduler, products, history, RNG state), so a run
   continues exactly where it stopped. Names must match `^[A-Za-z0-9_-]{1,64}$`.
 
@@ -174,6 +184,11 @@ without an industrial profile never reach this code, so their behaviour and dete
 * Template changes never alter running instances. Bound instances become *outdated* and are synchronised
   explicitly, with a dry-run diff available, and their overrides are preserved. A deploy or sync that
   would produce an invalid profile is rolled back.
+* Every asset class has a **default type** (`default-<kind>`, empty profile), created by
+  `IndustrialHub.ensure_default_types()` when the service starts and whenever a scenario is installed.
+  Assets and conveyors created through the API (or the editor palette) are bound to it automatically, so
+  sensors or conditions added to the default type later reach every such instance via the usual explicit
+  sync. Assets loaded from a scenario file keep the bindings stored in the file.
 
 ### Sensing, composites, conditions and behaviors
 
@@ -254,6 +269,37 @@ without an industrial profile never reach this code, so their behaviour and dete
   Scenario C (`scenarios/scenario_c_industrial_furnaces.json`) is a complete example. Its two typed
   furnaces have a simulated and a hybrid instance, attribute mappings and a ready-to-start dataset
   session.
+
+## Web editor
+
+The UI is plain JavaScript without a build step (`forms.js`, then `app.js`, then `industrial.js`).
+The asset inspector is a registry of **sections**, so new kinds of information can be added without
+touching the existing code:
+
+```js
+registerInspectorSection({
+  id: "my-section", order: 45,            // position among the other sections
+  title: "My section", kinds: ["sink"],   // optional filter by asset kind
+  collapsible: true, collapsed: false,    // open/closed state is remembered per section
+  summary: (asset, shared) => "html",     // shown in the header, also when collapsed
+  actions: (asset) => [{ label: "Edit…", run: (asset, shared) => openSomeDialog(asset) }],
+  async mount(asset, body, shared, sec) { body.innerHTML = "…"; },          // first render
+  async refresh(asset, body, shared, prev, sec) { /* update in place */ },  // live updates
+});
+```
+
+* A selection change builds all sections off-screen, waits for every `mount`, and swaps them in
+  once, so there is no partial or flickering render. A token discards results of outdated renders.
+* While the simulation runs, the inspector calls each section's `refresh`, which updates only the
+  values that changed (`setHtml` skips identical HTML). The DOM structure, scroll position, open
+  `<details>`, focus and input being typed are kept. Statistics and the active-cycle card use
+  fixed-layout tables and truncated ids, so changing values cannot widen the panel.
+* Advanced configuration groups, attribute mappings, synchronisation settings and the per-device
+  API reference are summarised on one line and edited or shown in modals (`openFormDialog`,
+  `openJsonDialog`), which keeps the panel short.
+* Canvas labels (port labels and conveyor names) are placed greedily: each label tries several
+  positions along and beside its line and takes the first one that does not overlap a node or a label
+  already placed.
 
 ## Known limitations
 

@@ -58,7 +58,9 @@ docker run -p 8000:8000 -v sim-data:/data industrial-sim
 
 | Action | How |
 |---|---|
-| Load a built-in scenario | Toolbar select → **Load** |
+| Load a scenario | Toolbar select (every file in `scenarios/`) → **Load**. The current scenario name and file are shown on the left of the toolbar |
+| New scenario | **New…** asks for a name, file name, description and seed, then creates `scenarios/<file>.json` with an empty plant. Product types, recipes, production orders and asset types are kept (both can be unticked) |
+| Save / rename | **Save** writes the current plant to its scenario file; **Save as…** writes a new file and switches to it; **Rename…** changes the display name and/or file name. Existing files are never overwritten silently |
 | Run | **Start** / **Pause** / **Resume** / **Stop** / **Reset**. **Step** advances N simulated seconds while paused |
 | Accelerate | **Speed ×** (0.5 … 1000; the API accepts up to 10000) |
 | Add an asset | Left palette (producer, transformer, splitter, sink) opens a form dialog with name, settings and a live preview (throughput, cycle time, quality) |
@@ -67,16 +69,17 @@ docker run -p 8000:8000 -v sim-data:/data industrial-sim
 | Copy / paste | Select a machine and press **Ctrl+C**, then **Ctrl+V** (or **Ctrl+D** / **Duplicate** in the inspector). The copy keeps the full configuration; connections are not copied |
 | Ports | Transformers show one input/output port per recipe slot, labelled with quantity and product type (e.g. `10× Iron billet`). Sinks have a single input |
 | Pan / zoom / fit | Drag the background / mouse wheel / double-click the background |
-| Inspect | Click an asset to see its state, commands (start/stop/fault/restart), a form-based config editor per asset kind (dropdowns, sliders, rule and attribute rows, live preview; **Apply changes** sends only the changed fields as a versioned change; a raw-JSON fallback is under *Advanced*), statistics, operational history, config changes, and products received (sinks) |
+| Inspect | Click an asset. The inspector is a stack of sections (overview and commands, configuration, industrial profile, statistics, operational history, config changes, received products for sinks, API). Each section has a header with a summary and action buttons and can be collapsed. Basic settings are edited inline (**Apply changes** sends only the changed fields as a versioned change). Advanced groups such as buffers, quality curves and **attribute mappings** appear as one-line summaries with an **Edit…** button that opens a modal, and **{ } JSON…** opens the raw configuration. During a run the sections update in place, so the layout does not jump and inputs being edited are kept |
 | Products / DPP | **Products** tab → search → click a product to see its passport (identity, provenance, lineage tree, history: inherited entries from the same batch or cycle are merged into one step with a product count, and attributes are shown as chips) |
 | Catalog | Cards for product types, recipes and production orders with **+ New**, **Edit** and **Delete**. Recipes are built visually: input/output rows (type, quantity, by-product), processing time, defect policy, parameters |
 | Integration | Choose an adapter and fill in its connection fields (host/port/QoS, bootstrap servers, service URL), topic prefix and event categories; inspect published messages (in-memory adapter). Below it, **External data ingestion** configures the MQTT subscriber, shows ingestion counters and recent/rejected messages, and sends test envelopes over REST |
-| Industrial profile | Inspector section of every asset: bound asset type (bind, detach, update to the latest version with a preview), live measurements, parameters, sensors, composites, conditions and behaviors with origin badges (*template*, *override*, *local*) and **Override** / **Reset** buttons, local definitions (JSON), an expression tester, the synchronisation mode and the last evaluated features |
-| Types | Asset-type cards: create/edit (JSON with expression tester; every save is a new version), duplicate, delete, **Deploy** a bound instance, and update outdated instances after a preview |
+| Industrial profile | Inspector section of every asset: bound asset type (bind, detach, update to the latest version with a preview), live measurements, parameters, sensors, composites, conditions and behaviors with origin badges (*template*, *override*, *local*) and **Override** / **Reset** buttons, local definitions (JSON), an expression tester, a synchronisation summary with **Edit…** (modal) and the last evaluated features |
+| Types | Asset-type cards: create/edit with a form (name, ID, asset class, description, template config, parameters, sensors) or as JSON (**Edit as JSON…**, with expression tester, for composites, conditions and behaviors); every save is a new version. Duplicate, delete, **Deploy** a bound instance, and update outdated instances after a preview. Every asset class has a default type (`default-producer`, `default-transformer`, …) that new assets are bound to automatically |
 | Datasets | Continuous collector and collection sessions: create/edit (datasets, assets, measurements, product types, attributes, aggregations, sampling, start/end conditions, missing-value policy, format), start/pause/resume/stop/clear, preview tables, per-dataset export, ZIP bundle with manifest |
 | Save state | **Export JSON** / **Import JSON** (scenario definition); **Save ckpt** / **Restore ckpt** (full runtime state) |
 
-Conveyor items are drawn at their real position; defective items are red.
+Conveyor items are drawn at their real position; defective items are red. Port and conveyor labels are
+placed so that they do not overlap nodes or each other (long port labels are shortened with "…").
 
 ## Built-in scenarios
 
@@ -124,6 +127,7 @@ When a broker adapter is enabled, the device publishes on `<topic_prefix>.machin
 | History | `GET /api/assets/{id}/stats`, `/operational-history`, `/products`; `GET /api/config-changes`; `GET /api/events?since_seq=&event_type=&asset_id=` |
 | Traceability | `GET /api/products?…`, `GET /api/products/{id}` (DPP), `GET /api/products/{id}/history`, `GET /api/cycles`, `GET /api/cycles/{id}` |
 | Persistence | `GET/POST /api/scenario`, `GET /api/scenarios`, `POST /api/scenarios/{id}/load`, `GET/POST /api/checkpoints`, `POST /api/checkpoints/{name}/restore` |
+| Scenario files | `GET /api/scenarios/current` (`{id, name, description, saved}`), `POST /api/scenarios` (new empty plant in a new file: `{name, id?, description?, seed?, keep_catalog?, keep_asset_types?}`; 409 if the file exists), `PUT /api/scenarios/{id}?overwrite=` (save the current plant), `POST /api/scenarios/{id}/rename` (`{new_id?, name?}`) |
 | Integration | `GET/POST /api/integration`, `GET /api/integration/messages` |
 | Asset types | `GET/POST /api/asset-types`, `GET/PUT/DELETE /api/asset-types/{id}`, `POST /api/asset-types/{id}/duplicate`, `/deploy`, `/sync?dry_run=` |
 | Industrial profile | `GET /api/assets/{id}/industrial`, `PUT /api/assets/{id}/parameters`, `PUT/DELETE /api/assets/{id}/overrides/{section}/{key}`, `PUT /api/assets/{id}/local`, `POST /api/assets/{id}/bind`, `/unbind`, `/sync-type?dry_run=`, `GET /api/assets/{id}/measurements`, `/conditions`, `GET /api/conditions/log`, `POST /api/expressions/validate`, `GET /api/units` |
@@ -184,7 +188,7 @@ curl -X POST localhost:8000/api/ingestion/events -H "Content-Type: application/j
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-There are 116 tests covering:
+There are 125 tests covering:
 
 * timing and the accelerator
 * material flow and blocking
@@ -201,6 +205,8 @@ There are 116 tests covering:
   strict/lenient reconciliation, hybrid mode
 * dataset collection, sessions and CSV/JSONL/ZIP export
 * the industrial REST API and the furnace example scenario (scenario C)
+* scenario files: new empty plant that keeps the catalogues, save, save as, rename, conflicts, and
+  default asset types bound to new assets
 
 ## Benchmark
 
