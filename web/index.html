@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <title>Industrial Digital Twin Simulator</title>
-  <link rel="stylesheet" href="/static/style.css?v=8">
+  <link rel="stylesheet" href="/static/style.css?v=9">
 </head>
 <body>
 <header id="toolbar">
@@ -63,6 +63,8 @@
       <button data-tab="events">Events</button>
       <button data-tab="products">Products</button>
       <button data-tab="catalog">Catalog</button>
+      <button data-tab="types" title="Asset types: reusable templates with sensors, conditions and behaviors">Types</button>
+      <button data-tab="datasets">Datasets</button>
       <button data-tab="integration">Integration</button>
     </nav>
     <div id="tab-inspector" class="tab active"><p class="hint">Select an asset on the canvas.</p></div>
@@ -90,6 +92,20 @@
       <div class="cat-head"><h4>Production orders</h4><button class="small primary" data-new="order">+ New order</button></div>
       <div id="orders-list"></div>
     </div>
+    <div id="tab-types" class="tab">
+      <div class="cat-head"><h4>Asset types</h4><button class="small primary" id="btn-new-asset-type">+ New asset type</button></div>
+      <p class="hint">Reusable machine templates: configuration plus parameters, sensors, composite measurements, working conditions and
+        behaviors. Deployed instances inherit them, may override individual items and are updated explicitly when the type changes.</p>
+      <div id="types-catalog"></div>
+    </div>
+    <div id="tab-datasets" class="tab">
+      <p class="hint">Collect sensor, cycle, product and machine datasets for analytics and ML.       The continuous collector records whenever it is started;
+              sessions record a configurable subset between start/stop (or until an end condition).</p>
+      <h4>Continuous collector</h4>
+      <div id="ds-continuous"></div>
+      <div class="cat-head"><h4>Collection sessions</h4><button class="small primary" id="btn-new-session">+ New session</button></div>
+      <div id="ds-sessions"></div>
+    </div>
     <div id="tab-integration" class="tab">
       <p class="hint">Publish machine/product/config events and metrics to a broker. The in-memory adapter
         needs no external service; Kafka/MQTT/Pulsar require their Python client libraries and a running broker.</p>
@@ -112,6 +128,26 @@
       <div id="int-info" class="log"></div>
       <button id="btn-int-msgs">Show last messages</button>
       <pre id="int-msgs" class="log"></pre>
+      <div id="ingestion">
+        <h4>External data ingestion</h4>
+        <p class="hint">Assets in <b>external</b> or <b>hybrid</b> synchronisation mode (Inspector → Industrial profile) are driven by
+          envelopes received over REST (<code>POST /api/ingestion/events</code>) or MQTT. Envelope:
+          <code>{schema_version, event_id, asset_id, event_type, timestamp, measurements | state | cycle | product | config}</code>.</p>
+        <div id="ingest-status" class="log"></div>
+        <details class="section"><summary>MQTT subscriber</summary>
+          <div id="mqtt-status"></div>
+          <div id="mqtt-form"></div>
+          <p class="help">Topic patterns may contain <code>{asset_id}</code> (external id) or MQTT wildcards; requires <code>paho-mqtt</code>.</p>
+          <div class="row"><button id="mqtt-save">Save</button><button id="mqtt-start" class="primary">Connect</button><button id="mqtt-stop">Disconnect</button></div>
+        </details>
+        <details class="section"><summary>Send a test envelope (REST)</summary>
+          <textarea id="ingest-body" rows="10" class="code" placeholder="envelope JSON (or an array of envelopes)"></textarea>
+          <div class="row"><button id="ingest-sample">Sample</button><button id="ingest-send" class="primary">Send</button></div>
+          <pre id="ingest-result" class="log"></pre>
+        </details>
+        <div class="row"><button id="ingest-msgs">Recent ingested messages</button><button id="ingest-rejected">Rejected only</button></div>
+        <div id="ingest-log" class="log"></div>
+      </div>
     </div>
   </aside>
 </main>
@@ -121,7 +157,8 @@
     <div id="modal-content"></div>
   </div>
 </div>
-<script src="/static/forms.js?v=8"></script>
-<script src="/static/app.js?v=8"></script>
+<script src="/static/forms.js?v=9"></script>
+<script src="/static/app.js?v=9"></script>
+<script src="/static/industrial.js?v=9"></script>
 </body>
 </html>

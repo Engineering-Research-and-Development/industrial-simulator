@@ -70,7 +70,10 @@ docker run -p 8000:8000 -v sim-data:/data industrial-sim
 | Inspect | Click an asset to see its state, commands (start/stop/fault/restart), a form-based config editor per asset kind (dropdowns, sliders, rule and attribute rows, live preview; **Apply changes** sends only the changed fields as a versioned change; a raw-JSON fallback is under *Advanced*), statistics, operational history, config changes, and products received (sinks) |
 | Products / DPP | **Products** tab → search → click a product to see its passport (identity, provenance, lineage tree, history: inherited entries from the same batch or cycle are merged into one step with a product count, and attributes are shown as chips) |
 | Catalog | Cards for product types, recipes and production orders with **+ New**, **Edit** and **Delete**. Recipes are built visually: input/output rows (type, quantity, by-product), processing time, defect policy, parameters |
-| Integration | Choose an adapter and fill in its connection fields (host/port/QoS, bootstrap servers, service URL), topic prefix and event categories; inspect published messages (in-memory adapter) |
+| Integration | Choose an adapter and fill in its connection fields (host/port/QoS, bootstrap servers, service URL), topic prefix and event categories; inspect published messages (in-memory adapter). Below it, **External data ingestion** configures the MQTT subscriber, shows ingestion counters and recent/rejected messages, and sends test envelopes over REST |
+| Industrial profile | Inspector section of every asset: bound asset type (bind, detach, update to the latest version with a preview), live measurements, parameters, sensors, composites, conditions and behaviors with origin badges (*template*, *override*, *local*) and **Override** / **Reset** buttons, local definitions (JSON), an expression tester, the synchronisation mode and the last evaluated features |
+| Types | Asset-type cards: create/edit (JSON with expression tester; every save is a new version), duplicate, delete, **Deploy** a bound instance, and update outdated instances after a preview |
+| Datasets | Continuous collector and collection sessions: create/edit (datasets, assets, measurements, product types, attributes, aggregations, sampling, start/end conditions, missing-value policy, format), start/pause/resume/stop/clear, preview tables, per-dataset export, ZIP bundle with manifest |
 | Save state | **Export JSON** / **Import JSON** (scenario definition); **Save ckpt** / **Restore ckpt** (full runtime state) |
 
 Conveyor items are drawn at their real position; defective items are red.
@@ -81,8 +84,13 @@ Conveyor items are drawn at their real position; defective items are red.
   → screw press → quality splitter (conditional on `is_defective` / quality) → accepted and rejected sinks.
 * **Scenario B – multiple inputs and outputs**: a transformer with several inputs, a main product and a
   by-product routed to separate sinks, plus a percentage splitter.
+* **Scenario C – instrumented smelting furnaces**: two instances of the `furnace` asset type
+  (temperature/pressure sensors, composite health, `cold` and `overpressure` working conditions, a
+  speed behavior). *Furnace 2* runs in **hybrid** mode: its measurements are ingested externally as
+  `FURN-2` (sensor keys `TT101`, `PT102`). Ingot and slag attributes are mapped from measurements, input
+  products, conditions and cycle context. A ready-to-start dataset session collects the first hour.
 
-Both run without invariant violations. More scenarios are exercised in the tests: configuration change
+All three run without invariant violations. More scenarios are exercised in the tests: configuration change
 mid-cycle (C) and blocked/failed downstream (D).
 
 ## REST API (selection)
@@ -117,6 +125,10 @@ When a broker adapter is enabled, the device publishes on `<topic_prefix>.machin
 | Traceability | `GET /api/products?…`, `GET /api/products/{id}` (DPP), `GET /api/products/{id}/history`, `GET /api/cycles`, `GET /api/cycles/{id}` |
 | Persistence | `GET/POST /api/scenario`, `GET /api/scenarios`, `POST /api/scenarios/{id}/load`, `GET/POST /api/checkpoints`, `POST /api/checkpoints/{name}/restore` |
 | Integration | `GET/POST /api/integration`, `GET /api/integration/messages` |
+| Asset types | `GET/POST /api/asset-types`, `GET/PUT/DELETE /api/asset-types/{id}`, `POST /api/asset-types/{id}/duplicate`, `/deploy`, `/sync?dry_run=` |
+| Industrial profile | `GET /api/assets/{id}/industrial`, `PUT /api/assets/{id}/parameters`, `PUT/DELETE /api/assets/{id}/overrides/{section}/{key}`, `PUT /api/assets/{id}/local`, `POST /api/assets/{id}/bind`, `/unbind`, `/sync-type?dry_run=`, `GET /api/assets/{id}/measurements`, `/conditions`, `GET /api/conditions/log`, `POST /api/expressions/validate`, `GET /api/units` |
+| Synchronisation & ingestion | `GET/PUT /api/assets/{id}/sync`, `POST /api/ingestion/events` (one envelope or an array of up to 1000), `GET /api/ingestion/status`, `/messages?status=`, `GET/PUT /api/ingestion/mqtt`, `POST /api/ingestion/mqtt/{start,stop}` |
+| Datasets | `GET /api/datasets`, `POST /api/datasets/sessions`, `GET/PUT/DELETE /api/datasets/sessions/{id}`, `POST /api/datasets/sessions/{id}/{start,pause,resume,stop,clear}`, `GET …/preview/{dataset}`, `…/export/{dataset}?format=`, `…/manifest`, `…/bundle` (the continuous collector has id `continuous`) |
 
 Errors return `{"error": ..., "detail": ...}`: 422 for validation, 404 for not found, 409 for conflict.
 
@@ -132,13 +144,47 @@ client library you need; the dependencies are listed, commented out, in `require
 JSON envelopes `{schema, event_id, category, type, sim_time, published_at, payload}` on the topics
 `<prefix>.machine`, `<prefix>.product`, `<prefix>.config` and `<prefix>.metrics`.
 
+## Industrial sensing, synchronisation and datasets
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#industrial-extension) for the full model. In short:
+
+* **Asset types** are versioned templates (kind, config and a *profile*: parameters, sensors, composites,
+  working conditions, behaviors). Deployed instances keep the version they were synchronised with;
+  they can override config values, parameters and individual profile items, and add local items.
+* **Sensors** are simulated (constant, expression, first-order lag, random walk; noise, gain, offset,
+  resolution, range, filters) or fed externally. **Composites**, **conditions** and **behaviors** use a
+  safe expression language, e.g. `clamp(sensor.temp / param.setpoint, 0, 1)`.
+* **Working conditions** activate/deactivate with hysteresis and delays, modify cycle features
+  (`processing_time_s`, `defect_probability`, …) and can block, stop or fault the machine.
+* **Synchronisation**: each asset runs in `simulation`, `external` or `hybrid` mode, per category
+  (`production`, `measurements`, `configuration`, `state`). External data arrives as envelopes:
+
+```powershell
+curl -X POST localhost:8000/api/ingestion/events -H "Content-Type: application/json" -d '{
+  "schema_version": "1.0", "event_id": "evt-1", "asset_id": "FURN-2", "event_type": "telemetry",
+  "timestamp": "2024-01-01T10:00:00Z", "measurements": {"TT101": {"value": 1395.2, "unit": "degC"}, "PT102": 1.31}}'
+```
+
+  Event types: `telemetry`, `cycle_started`, `cycle_completed`, `cycle_cancelled`, `batch_produced`,
+  `product_updated`, `configuration_changed` and `state_changed`. Duplicates (same `event_id`) are ignored,
+  and invalid messages are rejected without side effects. MQTT ingestion (`paho-mqtt`) subscribes to
+  configurable topics carrying the same envelopes.
+* **Product attributes** are declared on product types (type, unit, range, allowed values, required,
+  default). Recipe outputs and producers fill them through **attribute mappings** from constants,
+  parameters, measurements (cycle aggregations), features, input products (aggregations),
+  expressions, the production order, the cycle and conditions. Every value records its provenance
+  in the DPP.
+* **Datasets**: a continuous collector and named collection sessions build `sensor`, `cycle`, `product`
+  and `machine` datasets. These join on `asset_id`, `cycle_id`, `product_id` and `production_order_ids`,
+  and export as CSV or JSONL, individually or as a ZIP bundle with a manifest.
+
 ## Tests
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-There are 66 tests covering:
+There are 116 tests covering:
 
 * timing and the accelerator
 * material flow and blocking
@@ -147,7 +193,14 @@ There are 66 tests covering:
 * traceability and DPP lineage
 * REST API
 * integration (ordering, retries, idempotency)
-* scenarios A–D
+* scenarios A–D and the built-in scenarios (no invariant violations)
+* asset types: versioning, deployment, overrides, outdated instances and synchronisation
+* the expression language, sensors, composites, working conditions and behaviors
+* product attributes and attribute mappings (provenance, validation, by-products)
+* ingestion over REST and MQTT: deduplication, late and out-of-order data, unit conversion,
+  strict/lenient reconciliation, hybrid mode
+* dataset collection, sessions and CSV/JSONL/ZIP export
+* the industrial REST API and the furnace example scenario (scenario C)
 
 ## Benchmark
 

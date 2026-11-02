@@ -9,6 +9,8 @@ flowchart LR
   ENG --> ASSETS["Assets: producer / conveyor / transformer / splitter / sink"]
   ENG -- events --> BRIDGE["IntegrationBridge (outbox)"] --> PUB["Publisher: memory / MQTT / Kafka / Pulsar"]
   SVC --> SCN["scenario.py: JSON scenarios, pickle checkpoints"]
+  ENG <--> IND["IndustrialHub (simulator/industrial/): types, sensing, conditions, sync, datasets"]
+  EXT["External systems: REST / MQTT envelopes"] --> ING["Ingestion (canonical envelope)"] --> IND
 ```
 
 | Module | Responsibility |
@@ -22,6 +24,15 @@ flowchart LR
 | `integration.py` | Broker adapters, outbox bridge with retry, idempotent consumer |
 | `scenario.py` | Scenario export/import (`format` validated), built-in scenarios, checkpoints |
 | `api.py` | REST API, error mapping, static UI |
+| `industrial/hub.py` | `IndustrialHub` (`sim.industrial`): asset-type registry, instance bindings, sensor sampling, composites, working conditions, behaviors, sync configuration, attribute resolution |
+| `industrial/asset_types.py` | Versioned `AssetType` templates and per-instance `AssetBinding` (template snapshot, overrides, local items) |
+| `industrial/definitions.py` | Validation and normalisation of profile sections, product attribute definitions and attribute mappings |
+| `industrial/expressions.py` | Safe expression language (AST whitelist, no `eval`), compiled to pickle-safe trees |
+| `industrial/measurements.py` | `Observation`, bounded measurement store, latest values and per-cycle aggregates |
+| `industrial/ingestion.py` | Canonical external envelope, validation, deduplication, late/out-of-order handling, reconciliation |
+| `industrial/mqtt.py` | MQTT subscriber feeding the ingestion layer (injectable client factory) |
+| `industrial/datasets.py` | Continuous collector, collection sessions, dataset materialisation and CSV/JSONL/ZIP exporters |
+| `industrial/units.py` | Unit conversion table used for ingested measurements |
 
 The engine knows nothing about the UI, HTTP or brokers. Everything outside it observes the engine
 through listeners (`sim.listeners`, called with `(channel, payload)`) or queries.
@@ -134,7 +145,7 @@ through listeners (`sim.listeners`, called with `(channel, payload)`) or queries
 ## Persistence
 
 * **Scenario JSON** (`format: industrial-sim-scenario/v1`): catalog, assets, configs, positions and
-  connections. It holds no runtime state. On import, everything is validated before replacing the
+  connections, plus asset types, instance bindings, sync settings and dataset definitions. It holds no runtime state. On import, everything is validated before replacing the
   current network.
 * **Checkpoints** pickle the whole `Simulation` (scheduler, products, history, RNG state), so a run
   continues exactly where it stopped. Names must match `^[A-Za-z0-9_-]{1,64}$`.
@@ -145,6 +156,104 @@ About 30–40k events/s on a single thread. 50 parallel lines run at about 289×
 about 7 KB per product including full history. See the README for the benchmark table. Options:
 `Simulation(event_log_limit=N)` bounds the in-memory event log. The benchmark's `--no-trace` flag skips
 `tracemalloc`, which gives faster runs but no memory figure.
+
+## Industrial extension
+
+The industrial layer lives in `simulator/industrial/`. `IndustrialHub` is owned by the `Simulation`
+(`sim.industrial`), so its state is pickled with checkpoints and reset with the simulation. Assets
+without an industrial profile never reach this code, so their behaviour and determinism are unchanged.
+
+### Asset types and instances
+
+* An **asset type** bundles a kind, a default config and a *profile* with five sections: `parameters`,
+  `sensors`, `composites`, `conditions` and `behaviors`. Every update bumps the type `version` and adds a
+  changelog entry.
+* Deploying a type onto an asset stores a **binding**: the template snapshot of that version, the
+  instance `overrides` (config values, parameter values, partial patches of template items by id) and
+  `local` items that exist only on that instance.
+* Template changes never alter running instances. Bound instances become *outdated* and are synchronised
+  explicitly, with a dry-run diff available, and their overrides are preserved. A deploy or sync that
+  would produce an invalid profile is rolled back.
+
+### Sensing, composites, conditions and behaviors
+
+* **Expressions** (`sensor.temp`, `param.setpoint`, `composite.health`, `state.running`,
+  `cycle.progress`, …) are parsed with `ast` and converted to whitelisted tuple trees. Size, node count
+  and nesting depth are bounded. A missing variable raises `MissingValue`, and each caller applies its
+  own missing-value policy.
+* **Simulated sensors** sample on the scheduler event `ind:sample` every `sample_interval_s`. Models are
+  `constant`, `expression`, `first_order` (lag towards a target expression) and `random_walk`. The raw
+  value then passes through noise, gain, offset, resolution, range and an optional filter
+  (`moving_average` or `ema`). All randomness comes from the seeded simulation RNG.
+* Every value, whether simulated, ingested or computed, becomes an **observation**. It carries the asset,
+  measurement, unit, sim time, source, quality, cycle and original timestamps. The measurement store keeps
+  a bounded history, the latest *valid* value and incremental per-cycle aggregates
+  (initial/final/avg/min/max/count). Composites are re-evaluated in dependency order whenever an input
+  changes, and composite cycles are rejected.
+* **Working conditions** have activation and deactivation expressions (hysteresis) plus
+  `delay_on_s`/`delay_off_s`. Delayed transitions are scheduled as `ind:cond`, and re-evaluations
+    triggered by new values are coalesced into one `ind:eval` event at the current instant.
+  * Active conditions apply **effects** (`multiply`, `add`, `set`, `min`, `max`) to cycle features such as
+    `processing_time_s`, `speed_pct`, `quality_score` or `defect_probability`.
+  * Their **action** is one of `none`, `block` (no new cycles start), `stop` or `fault`.
+  * Transitions are recorded in the operational history and emitted as events.
+* **Behaviors** map parameters and measurements to an asset feature (e.g. `speed_pct = self * 1.1`
+  `when composite.health > 0.98`), clamped to the feature bounds. Invalid inputs fall back to the
+  nominal value. Features and parameters are snapshotted when a cycle starts, so a cycle in progress is
+  never affected by later changes.
+
+### Product attributes
+
+* Product types declare typed attributes (type, unit, min/max, allowed values, required, default).
+* Recipe outputs and producers fill them through **attribute mappings**. The sources are `constant`,
+  `parameter`, `measurement` (a cycle aggregation), `feature`, `input` (an aggregation over consumed
+  products), `expression`, `order`, `cycle` and `condition`. A mapping can carry `when`, `scale`,
+  `offset` and an `on_missing` policy.
+* Mappings are snapshotted at cycle start and resolved at completion. Every value records its provenance,
+  which the DPP exposes.
+
+### External synchronisation
+
+* Each asset has a sync configuration:
+  * `mode`: `simulation`, `external` or `hybrid`. In hybrid mode, each category (`production`,
+    `measurements`, `configuration`, `state`) is chosen independently.
+  * `external_id`.
+  * `reconciliation`: `strict` or `lenient`.
+  * `late_policy`: `store`, `apply` or `discard`.
+  * `time_mode`: `arrival` or `source`.
+  * `max_lateness_s` (default 30).
+* REST and MQTT both convert their payloads to one **canonical envelope** (`schema_version` "1.0") and call
+  `ingest()` while holding the controller lock. External events are therefore applied atomically
+  between simulation events.
+* A message is validated completely before any mutation, so a rejected message changes nothing.
+  Duplicates are detected by `event_id`, using a bounded memory.
+* Measurements are converted to the sensor's unit. Late and out-of-order values are stored with their
+  quality, and the late policy decides whether they update the latest value.
+* `cycle_completed` for a cycle that hasn't started yet is kept **pending** under lenient reconciliation
+  and applied when the start arrives. Strict reconciliation rejects it.
+* External production replaces simulated production for that asset. A sensor whose `source` is `auto`
+  follows the asset's `measurements` category; `simulated` or `external` pins it either way.
+* The MQTT broker connection is configured separately from the assets. If the broker can't be reached,
+  the client retries in the background while the simulation keeps running.
+
+### Datasets
+
+* A continuous collector and up to 50 named **collection sessions** observe the simulation, covering
+  simulated and ingested data alike.
+  * Sessions have a lifecycle (`created`, `scheduled`, `running`, `paused`, `stopped`, `completed`) and
+    start/end conditions (time, duration, cycle or product count).
+  * Each session records the time segments it was running.
+* There are four datasets, which join on `asset_id`, `cycle_id`, `product_id` and `production_order_ids`:
+  `sensor`, `cycle`, `product` and `machine`.
+  * Raw observations and machine records are captured live, with row caps.
+  * Cycle and product rows are **materialised at export time** from the engine's authoritative records,
+    so later product updates show up and retried events can't create duplicate rows.
+* Exporters are registered in `EXPORTERS`: CSV is the reference format and JSONL is a second example.
+  ZIP bundles add a manifest.
+* Dataset definitions, along with asset types, bindings and sync settings, are part of the scenario JSON.
+  Scenario C (`scenarios/scenario_c_industrial_furnaces.json`) is a complete example. Its two typed
+  furnaces have a simulated and a hybrid instance, attribute mappings and a ready-to-start dataset
+  session.
 
 ## Known limitations
 

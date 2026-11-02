@@ -340,6 +340,7 @@ async function renderInspector(force = false) {
       <div class="row"><button id="ins-apply-json">Apply JSON</button></div></details>
     ${a.kind === "sink" ? '<h4>Received products</h4><div class="row"><select id="sink-filter"><option value="">all</option><option value="completed=true">completed</option><option value="completed=false">stored</option><option value="defective=true">defective</option></select><button id="sink-list">List</button></div><div id="sink-products" class="log"></div>' : ""}
     ${deviceApiHtml(a, integ)}
+    <div id="ins-industrial" class="industrial"></div>
     <h4>Statistics</h4><div class="kv stats">${Object.entries(a.stats || {}).map(([k, v]) =>
       `<div>${esc(k.replace(/_/g, " "))}</div><div>${esc(typeof v === "number" ? +v.toFixed(3) : showValue(v) || "–")}</div>`).join("")}</div>
     <h4>Operational history (latest)</h4>
@@ -356,6 +357,9 @@ async function renderInspector(force = false) {
     const b = ev.target.closest("button[data-copy]"); if (!b) return;
     navigator.clipboard.writeText(b.dataset.copy).then(() => toast("Copied", true), () => toast("Copy failed"));
   });
+  if (typeof renderIndustrialPanel === "function") {
+    await renderIndustrialPanel(a, $("#ins-industrial")).catch((e) => ($("#ins-industrial").innerHTML = `<p class="hint">${esc(e.message)}</p>`));
+  }
   el.scrollTop = scroll;
   for (const ev of ["input", "change"]) {
     $("#ins-form").addEventListener(ev, () => (inspectorDirty = true));

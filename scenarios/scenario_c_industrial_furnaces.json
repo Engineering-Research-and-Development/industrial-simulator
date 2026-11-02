@@ -1,0 +1,207 @@
+{
+  "format": "industrial-sim-scenario/v1",
+  "name": "Scenario C - Instrumented smelting furnaces",
+  "description": "Two typed smelting furnaces with temperature/pressure sensors, composite health, working conditions and a behavior; furnace 2 runs hybrid (measurements ingested externally as FURN-2, keys TT101/PT102). Output attributes are mapped from measurements, inputs, conditions and cycle context; a ready-to-start dataset session collects the first hour.",
+  "seed": 7,
+  "product_types": [
+    {
+      "id": "ore",
+      "name": "Iron ore",
+      "attributes": [
+        {"name": "purity", "type": "number", "unit": "fraction", "min": 0, "max": 1, "default": 0.9},
+        {"name": "supplier", "type": "string", "default": "north-mine"}
+      ]
+    },
+    {
+      "id": "metal",
+      "name": "Metal ingot",
+      "attributes": [
+        {"name": "melt_temperature", "type": "number", "unit": "degC"},
+        {"name": "peak_pressure", "type": "number", "unit": "bar"},
+        {"name": "grade", "type": "enum", "allowed": ["A", "B", "C"], "required": true},
+        {"name": "ore_purity", "type": "number", "unit": "fraction"},
+        {"name": "cold_cycle", "type": "boolean"},
+        {"name": "lot", "type": "string"}
+      ]
+    },
+    {
+      "id": "slag",
+      "name": "Slag",
+      "attributes": [
+        {"name": "source_cycle", "type": "string"},
+        {"name": "furnace", "type": "string"}
+      ]
+    }
+  ],
+  "recipes": [
+    {
+      "id": "smelt",
+      "name": "Smelt ore",
+      "processing_time_s": 30,
+      "inputs": [{"product_type_id": "ore", "quantity": 1}],
+      "outputs": [
+        {
+          "product_type_id": "metal",
+          "quantity": 1,
+          "attribute_mappings": [
+            {"attribute": "melt_temperature", "source": "measurement", "ref": "temp", "aggregation": "avg"},
+            {"attribute": "peak_pressure", "source": "measurement", "ref": "pressure", "aggregation": "max"},
+            {"attribute": "grade", "source": "expression",
+             "expression": "'A' if composite.health > 0.97 else ('B' if composite.health > 0.9 else 'C')",
+             "on_missing": "default", "default": "C"},
+            {"attribute": "ore_purity", "source": "input", "ref": "purity", "aggregation": "avg"},
+            {"attribute": "cold_cycle", "source": "condition", "ref": "cold"},
+            {"attribute": "lot", "source": "cycle", "ref": "lot_number"}
+          ]
+        },
+        {
+          "product_type_id": "slag",
+          "quantity": 1,
+          "is_byproduct": true,
+          "attribute_mappings": [
+            {"attribute": "source_cycle", "source": "cycle", "ref": "cycle_id"},
+            {"attribute": "furnace", "source": "cycle", "ref": "asset_id"}
+          ]
+        }
+      ]
+    }
+  ],
+  "production_orders": [],
+  "asset_types": [
+    {
+      "id": "furnace",
+      "name": "Smelting furnace",
+      "kind": "transformer",
+      "version": 1,
+      "description": "Gas-fired furnace with temperature and pressure instrumentation",
+      "config": {"speed_pct": 80},
+      "profile": {
+        "parameters": [
+          {"name": "setpoint", "label": "Temperature setpoint", "type": "number", "unit": "degC",
+           "default": 1450, "min": 800, "max": 1700}
+        ],
+        "sensors": [
+          {"id": "temp", "name": "Chamber temperature", "quantity": "temperature", "unit": "degC",
+           "external_key": "TT101", "sample_interval_s": 5, "noise_std": 4, "resolution": 0.1,
+           "model": {"type": "first_order", "target": "param.setpoint", "time_constant_s": 60, "initial": 25}},
+          {"id": "pressure", "name": "Chamber pressure", "quantity": "pressure", "unit": "bar",
+           "external_key": "PT102", "sample_interval_s": 10, "noise_std": 0.02,
+           "model": {"type": "expression", "expression": "1.0 + 0.3 * clamp(sensor.temp / param.setpoint, 0, 1)"},
+           "min": 0.8, "max": 2.0, "filter": {"type": "ema", "alpha": 0.3}}
+        ],
+        "composites": [
+          {"id": "health", "name": "Thermal health", "expression": "clamp(sensor.temp / param.setpoint, 0, 1)"},
+          {"id": "temp_f", "name": "Temperature (F)", "unit": "degF", "expression": "sensor.temp * 1.8 + 32"}
+        ],
+        "conditions": [
+          {"id": "cold", "severity": "warning", "activation": "sensor.temp < param.setpoint * 0.9",
+           "deactivation": "sensor.temp > param.setpoint * 0.92", "delay_on_s": 5,
+           "message": "Furnace below operating temperature",
+           "effects": [
+             {"target": "processing_time_s", "op": "multiply", "value": 1.5},
+             {"target": "defect_probability", "op": "add", "value": 0.05}
+           ]},
+          {"id": "overpressure", "severity": "critical", "activation": "sensor.pressure > 1.8",
+           "deactivation": "sensor.pressure < 1.6", "action": "block", "message": "Chamber pressure too high"}
+        ],
+        "behaviors": [
+          {"id": "hot_boost", "output": "speed_pct", "expression": "self * 1.1", "when": "composite.health > 0.98"}
+        ]
+      },
+      "changelog": [{"version": 1, "time": 0.0, "summary": "created"}]
+    }
+  ],
+  "assets": [
+    {
+      "id": "feed1", "kind": "producer", "name": "Ore feed 1",
+      "config": {"product_type_id": "ore", "interval": 20, "attribute_mappings": [
+        {"attribute": "purity", "source": "constant", "value": 0.93},
+        {"attribute": "supplier", "source": "constant", "value": "north-mine"}
+      ]},
+      "position": {"x": 60, "y": 80}
+    },
+    {
+      "id": "feed2", "kind": "producer", "name": "Ore feed 2",
+      "config": {"product_type_id": "ore", "interval": 20, "attribute_mappings": [
+        {"attribute": "purity", "source": "constant", "value": 0.87},
+        {"attribute": "supplier", "source": "constant", "value": "south-mine"}
+      ]},
+      "position": {"x": 60, "y": 300}
+    },
+    {
+      "id": "furnace1", "kind": "transformer", "name": "Furnace 1 (simulated)",
+      "config": {"recipe_id": "smelt", "speed_pct": 80},
+      "position": {"x": 320, "y": 80},
+      "industrial": {"type_id": "furnace", "type_version": 1, "template": {
+        "config": {"speed_pct": 80},
+        "profile": {
+          "parameters": [{"name": "setpoint", "label": "Temperature setpoint", "type": "number", "unit": "degC", "default": 1450, "min": 800, "max": 1700}],
+          "sensors": [
+            {"id": "temp", "name": "Chamber temperature", "quantity": "temperature", "unit": "degC", "external_key": "TT101", "sample_interval_s": 5, "noise_std": 4, "resolution": 0.1, "model": {"type": "first_order", "target": "param.setpoint", "time_constant_s": 60, "initial": 25}},
+            {"id": "pressure", "name": "Chamber pressure", "quantity": "pressure", "unit": "bar", "external_key": "PT102", "sample_interval_s": 10, "noise_std": 0.02, "model": {"type": "expression", "expression": "1.0 + 0.3 * clamp(sensor.temp / param.setpoint, 0, 1)"}, "min": 0.8, "max": 2.0, "filter": {"type": "ema", "alpha": 0.3}}],
+          "composites": [
+            {"id": "health", "name": "Thermal health", "expression": "clamp(sensor.temp / param.setpoint, 0, 1)"},
+            {"id": "temp_f", "name": "Temperature (F)", "unit": "degF", "expression": "sensor.temp * 1.8 + 32"}],
+          "conditions": [
+            {"id": "cold", "severity": "warning", "activation": "sensor.temp < param.setpoint * 0.9", "deactivation": "sensor.temp > param.setpoint * 0.92", "delay_on_s": 5, "message": "Furnace below operating temperature", "effects": [{"target": "processing_time_s", "op": "multiply", "value": 1.5}, {"target": "defect_probability", "op": "add", "value": 0.05}]},
+            {"id": "overpressure", "severity": "critical", "activation": "sensor.pressure > 1.8", "deactivation": "sensor.pressure < 1.6", "action": "block", "message": "Chamber pressure too high"}],
+          "behaviors": [{"id": "hot_boost", "output": "speed_pct", "expression": "self * 1.1", "when": "composite.health > 0.98"}]}},
+        "overrides": {}, "local": {}}
+    },
+    {
+      "id": "furnace2", "kind": "transformer", "name": "Furnace 2 (hybrid)",
+      "config": {"recipe_id": "smelt", "speed_pct": 80},
+      "position": {"x": 320, "y": 300},
+      "industrial": {"type_id": "furnace", "type_version": 1, "template": {
+        "config": {"speed_pct": 80},
+        "profile": {
+          "parameters": [{"name": "setpoint", "label": "Temperature setpoint", "type": "number", "unit": "degC", "default": 1450, "min": 800, "max": 1700}],
+          "sensors": [
+            {"id": "temp", "name": "Chamber temperature", "quantity": "temperature", "unit": "degC", "external_key": "TT101", "sample_interval_s": 5, "noise_std": 4, "resolution": 0.1, "model": {"type": "first_order", "target": "param.setpoint", "time_constant_s": 60, "initial": 25}},
+            {"id": "pressure", "name": "Chamber pressure", "quantity": "pressure", "unit": "bar", "external_key": "PT102", "sample_interval_s": 10, "noise_std": 0.02, "model": {"type": "expression", "expression": "1.0 + 0.3 * clamp(sensor.temp / param.setpoint, 0, 1)"}, "min": 0.8, "max": 2.0, "filter": {"type": "ema", "alpha": 0.3}}],
+          "composites": [
+            {"id": "health", "name": "Thermal health", "expression": "clamp(sensor.temp / param.setpoint, 0, 1)"},
+            {"id": "temp_f", "name": "Temperature (F)", "unit": "degF", "expression": "sensor.temp * 1.8 + 32"}],
+          "conditions": [
+            {"id": "cold", "severity": "warning", "activation": "sensor.temp < param.setpoint * 0.9", "deactivation": "sensor.temp > param.setpoint * 0.92", "delay_on_s": 5, "message": "Furnace below operating temperature", "effects": [{"target": "processing_time_s", "op": "multiply", "value": 1.5}, {"target": "defect_probability", "op": "add", "value": 0.05}]},
+            {"id": "overpressure", "severity": "critical", "activation": "sensor.pressure > 1.8", "deactivation": "sensor.pressure < 1.6", "action": "block", "message": "Chamber pressure too high"}],
+          "behaviors": [{"id": "hot_boost", "output": "speed_pct", "expression": "self * 1.1", "when": "composite.health > 0.98"}]}},
+        "overrides": {"parameters": {"setpoint": 1400}}, "local": {}},
+      "sync": {"mode": "hybrid", "external_id": "FURN-2", "categories": {"measurements": "external"}}
+    },
+    {"id": "ingots1", "kind": "sink", "name": "Ingots", "config": {}, "position": {"x": 600, "y": 40}},
+    {"id": "slag1", "kind": "sink", "name": "Slag 1", "config": {}, "position": {"x": 600, "y": 160}},
+    {"id": "ingots2", "kind": "sink", "name": "Ingots 2", "config": {}, "position": {"x": 600, "y": 260}},
+    {"id": "slag2", "kind": "sink", "name": "Slag 2", "config": {}, "position": {"x": 600, "y": 380}},
+    {"id": "cv1", "kind": "conveyor", "name": "Conveyor 1", "config": {"length_m": 4, "speed_m_s": 0.5},
+     "source": {"asset_id": "feed1", "port": "out"}, "target": {"asset_id": "furnace1", "port": "in0"}},
+    {"id": "cv2", "kind": "conveyor", "name": "Conveyor 2", "config": {"length_m": 4, "speed_m_s": 0.5},
+     "source": {"asset_id": "furnace1", "port": "out0"}, "target": {"asset_id": "ingots1", "port": "in0"}},
+    {"id": "cv3", "kind": "conveyor", "name": "Conveyor 3", "config": {"length_m": 4, "speed_m_s": 0.5},
+     "source": {"asset_id": "furnace1", "port": "out1"}, "target": {"asset_id": "slag1", "port": "in0"}},
+    {"id": "cv4", "kind": "conveyor", "name": "Conveyor 4", "config": {"length_m": 4, "speed_m_s": 0.5},
+     "source": {"asset_id": "feed2", "port": "out"}, "target": {"asset_id": "furnace2", "port": "in0"}},
+    {"id": "cv5", "kind": "conveyor", "name": "Conveyor 5", "config": {"length_m": 4, "speed_m_s": 0.5},
+     "source": {"asset_id": "furnace2", "port": "out0"}, "target": {"asset_id": "ingots2", "port": "in0"}},
+    {"id": "cv6", "kind": "conveyor", "name": "Conveyor 6", "config": {"length_m": 4, "speed_m_s": 0.5},
+     "source": {"asset_id": "furnace2", "port": "out1"}, "target": {"asset_id": "slag2", "port": "in0"}}
+  ],
+  "datasets": {
+    "continuous": {"enabled": false},
+    "sessions": [
+      {
+        "id": "DS-0001",
+        "name": "Furnace study",
+        "description": "Sensor, cycle and product data of both furnaces for the first simulated hour",
+        "experiment": "setpoint-comparison",
+        "config": {
+          "assets": ["furnace1", "furnace2"],
+          "datasets": ["sensor", "cycle", "product", "machine"],
+          "sampling": {"mode": "both", "interval_s": 30},
+          "aggregations": ["avg", "min", "max", "final"],
+          "end": {"type": "duration", "value": 3600}
+        }
+      }
+    ]
+  }
+}
