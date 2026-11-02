@@ -30,16 +30,21 @@ SCENARIO_FORMAT = "industrial-sim-scenario/v1"
 
 def export_scenario(sim: Simulation) -> dict:
     assets, conveyors = [], []
+    ind = sim.industrial.to_scenario()
     for a in sim.assets.values():
         entry = {"id": a.id, "kind": a.kind, "name": a.name, "config": a.to_config_dict(),
                  "position": dict(a.position)}
+        if a.id in ind["bindings"]:
+            entry["industrial"] = ind["bindings"][a.id]
+        if a.id in ind["sync"]:
+            entry["sync"] = ind["sync"][a.id]
         if isinstance(a, Conveyor):
             entry["source"] = {"asset_id": a.source[0], "port": a.source[1]}
             entry["target"] = {"asset_id": a.target[0], "port": a.target[1]}
             conveyors.append(entry)
         else:
             assets.append(entry)
-    return {
+    out = {
         "format": SCENARIO_FORMAT,
         "name": sim.name,
         "seed": sim.seed,
@@ -48,6 +53,12 @@ def export_scenario(sim: Simulation) -> dict:
         "production_orders": [o.to_dict() for o in sim.orders.values() if o.id != DEFAULT_ORDER_ID],
         "assets": assets + conveyors,
     }
+    if ind["asset_types"]:
+        out["asset_types"] = ind["asset_types"]
+    ds = sim.datasets.to_scenario()
+    if ds["sessions"] or ds["continuous"]["enabled"]:
+        out["datasets"] = ds
+    return out
 
 
 def load_scenario(data: dict, *, seed: int | None = None, event_log_limit: int | None = None) -> Simulation:
@@ -57,7 +68,7 @@ def load_scenario(data: dict, *, seed: int | None = None, event_log_limit: int |
     fmt = data.get("format", SCENARIO_FORMAT)
     if fmt != SCENARIO_FORMAT:
         raise ValidationError(f"unsupported scenario format {fmt!r} (expected {SCENARIO_FORMAT!r})")
-    for key in ("product_types", "production_orders", "recipes", "assets"):
+    for key in ("product_types", "production_orders", "recipes", "assets", "asset_types"):
         if not isinstance(data.get(key, []), list):
             raise ValidationError(f"'{key}' must be a list")
     s = data.get("seed") if seed is None else seed
@@ -71,6 +82,7 @@ def load_scenario(data: dict, *, seed: int | None = None, event_log_limit: int |
             sim.add_order(o)
         for r in data.get("recipes", []):
             sim.add_recipe(r)
+        sim.industrial.load_types(data.get("asset_types", []))
         items = data.get("assets", [])
         if not isinstance(items, list):
             raise ValidationError("assets must be a list")
@@ -82,6 +94,13 @@ def load_scenario(data: dict, *, seed: int | None = None, event_log_limit: int |
             if a.get("kind") == "conveyor":
                 sim.add_conveyor(a.get("name", a.get("id", "")), a.get("source"), a.get("target"),
                                  a.get("config") or {}, asset_id=a.get("id"), position=a.get("position"))
+        for a in items:
+            if a.get("industrial") or a.get("sync"):
+                aid = a.get("id")
+                if aid not in sim.assets:
+                    raise ValidationError("assets with industrial or sync settings need an explicit id")
+                sim.industrial.restore_binding(aid, a.get("industrial"), a.get("sync"))
+        sim.datasets.load(data.get("datasets"))
     except ValidationError:
         raise
     except (AttributeError, TypeError, KeyError) as exc:

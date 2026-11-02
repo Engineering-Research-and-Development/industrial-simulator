@@ -52,21 +52,24 @@ class ProductType:
     name: str
     description: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    attributes: list[dict[str, Any]] = field(default_factory=list)   # product attribute definitions
 
     @classmethod
     def from_dict(cls, d: dict) -> "ProductType":
         if not isinstance(d, dict):
             raise ValidationError("product type must be an object")
+        from .industrial.definitions import normalize_attribute_definitions
         return cls(
             id=validate_id(d.get("id"), "product type id"),
             name=_require_str(d, "name"),
             description=str(d.get("description") or ""),
             metadata=_require_dict(d.get("metadata"), "metadata"),
+            attributes=normalize_attribute_definitions(d.get("attributes")),
         )
 
     def to_dict(self) -> dict:
         return {"id": self.id, "name": self.name, "description": self.description,
-                "metadata": copy.deepcopy(self.metadata)}
+                "metadata": copy.deepcopy(self.metadata), "attributes": copy.deepcopy(self.attributes)}
 
 
 # --------------------------------------------------------------------------- recipes
@@ -79,10 +82,13 @@ class RecipeItem:
     product_type_id: str
     quantity: int
     is_byproduct: bool = False
+    attribute_mappings: list[dict[str, Any]] = field(default_factory=list)   # outputs only
 
     def to_dict(self) -> dict:
-        return {"product_type_id": self.product_type_id, "quantity": self.quantity,
-                "is_byproduct": self.is_byproduct}
+        d = {"product_type_id": self.product_type_id, "quantity": self.quantity, "is_byproduct": self.is_byproduct}
+        if self.attribute_mappings:
+            d["attribute_mappings"] = copy.deepcopy(self.attribute_mappings)
+        return d
 
 
 @dataclass
@@ -116,7 +122,13 @@ class Recipe:
                 byp = bool(it.get("is_byproduct", False))
                 if byp and not allow_byproduct:
                     raise ValidationError("only outputs may be by-products")
-                result.append(RecipeItem(ptid, qty, byp))
+                mappings = []
+                if it.get("attribute_mappings"):
+                    if not allow_byproduct:
+                        raise ValidationError(f"recipe {key}[{i}]: attribute mappings are defined on outputs only")
+                    from .industrial.definitions import normalize_mappings
+                    mappings = normalize_mappings(it["attribute_mappings"], f"{key}[{i}].attribute_mappings")
+                result.append(RecipeItem(ptid, qty, byp, mappings))
             return result
 
         policy = d.get("defect_policy", "any_defective_input")
@@ -256,6 +268,8 @@ class Product:
     attributes: dict[str, Any] = field(default_factory=dict)
     history: list[HistoryEntry] = field(default_factory=list)
     terminal_at: float | None = None
+    attribute_provenance: dict[str, dict] = field(default_factory=dict)
+    external_id: str | None = None
 
     @property
     def primary_order_id(self) -> str:
@@ -274,7 +288,8 @@ class Product:
             "is_defective": self.is_defective, "quality_score": self.quality_score,
             "production_order_ids": list(self.production_order_ids),
             "origin_cycle_id": self.origin_cycle_id, "parent_ids": list(self.parent_ids),
-            "terminal_at": self.terminal_at,
+            "terminal_at": self.terminal_at, "attributes": copy.deepcopy(self.attributes),
+            "external_id": self.external_id,
         }
 
 
@@ -299,6 +314,11 @@ class ProductionCycle:
     output_ids: list[str] = field(default_factory=list)
     defect_count: int = 0
     end_reason: str | None = None
+    measurements: dict[str, dict] = field(default_factory=dict)      # per-cycle measurement aggregates
+    source: str = "simulation"                                       # 'simulation' | 'external'
+    external_cycle_id: str | None = None
+    external_timestamps: dict[str, Any] = field(default_factory=dict)
+    exceptions: list[str] = field(default_factory=list)              # reconciliation exceptions (lenient)
 
     def to_dict(self) -> dict:
         return {
@@ -310,6 +330,10 @@ class ProductionCycle:
             "config_snapshot": copy.deepcopy(self.config_snapshot),
             "input_ids": list(self.input_ids), "output_ids": list(self.output_ids),
             "defect_count": self.defect_count, "end_reason": self.end_reason,
+            "measurements": copy.deepcopy(self.measurements), "source": self.source,
+            "external_cycle_id": self.external_cycle_id,
+            "external_timestamps": copy.deepcopy(self.external_timestamps),
+            "exceptions": list(self.exceptions),
         }
 
 

@@ -13,12 +13,16 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .controller import SimulationController
 from .engine import Simulation
 from .errors import NotFoundError, SimulatorError, ValidationError
+from .industrial.datasets import DATASETS
+from .industrial.ingestion import ingest
+from .industrial.mqtt import MqttIngestor
+from .industrial.units import known_units
 from .integration import IntegrationBridge, create_publisher
 from .scenario import (export_scenario, list_builtin_scenarios, list_checkpoints, load_checkpoint, load_scenario,
                        read_builtin_scenario, save_checkpoint)
@@ -30,7 +34,7 @@ class SimulationService:
     """Owns the controller, the active simulation and the optional broker bridge."""
 
     def __init__(self, sim: Simulation | None = None, *, checkpoint_dir: Path | None = None,
-                 background: bool = True) -> None:
+                 background: bool = True, mqtt_client_factory=None) -> None:
         self.controller = SimulationController(sim or Simulation(seed=42))
         self.bridge: IntegrationBridge | None = None
         self.checkpoint_dir = checkpoint_dir
@@ -38,10 +42,22 @@ class SimulationService:
         self._metric_seq = itertools.count(1)
         self._last_metrics_wall = 0.0
         self.controller.on_tick.append(self._publish_metrics)
+        self.mqtt = MqttIngestor(self.controller.lock, lambda: self.sim, client_factory=mqtt_client_factory,
+                                 before_ingest=self.sync_clock)
 
     @property
     def sim(self) -> Simulation:
         return self.controller.sim
+
+    def sync_clock(self) -> None:
+        """Advance a running simulation to the current wall-clock target before applying external events."""
+        if self.controller.status == "running":
+            self.controller.tick()
+
+    def ingest(self, envelope: Any, transport: str = "rest") -> dict:
+        with self.controller.lock:
+            self.sync_clock()
+            return ingest(self.sim, envelope, transport=transport)
 
     def _publish_metrics(self) -> None:
         if self.bridge is None:
@@ -78,6 +94,7 @@ class SimulationService:
     def shutdown(self) -> None:
         self.controller.stop_background()
         self.disable_integration()
+        self.mqtt.stop()
 
 
 def _int(value: Any, name: str) -> int:
@@ -443,6 +460,254 @@ def create_app(service: SimulationService | None = None) -> FastAPI:
         if bridge is None or not hasattr(bridge.publisher, "decoded"):
             raise ValidationError("message inspection is only available for the in-memory adapter")
         return bridge.publisher.decoded()[-limit:]  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------ asset types
+    def hub():
+        return svc.sim.industrial
+
+    @app.get("/api/asset-types")
+    def asset_types():
+        with lock:
+            h = hub()
+            return [h.type_summary(t) for t in h.asset_types.values()]
+
+    @app.post("/api/asset-types", status_code=201)
+    def asset_type_create(payload: Any = Body(...)):
+        with lock:
+            h = hub()
+            return h.type_summary(h.create_type(body_dict(payload)))
+
+    @app.get("/api/asset-types/{type_id}")
+    def asset_type_get(type_id: str):
+        with lock:
+            h = hub()
+            return h.type_summary(h.get_type(type_id))
+
+    @app.put("/api/asset-types/{type_id}")
+    def asset_type_update(type_id: str, payload: Any = Body(...)):
+        with lock:
+            h = hub()
+            return h.type_summary(h.update_type(type_id, body_dict(payload)))
+
+    @app.delete("/api/asset-types/{type_id}", status_code=204)
+    def asset_type_delete(type_id: str):
+        with lock:
+            hub().delete_type(type_id)
+
+    @app.post("/api/asset-types/{type_id}/duplicate", status_code=201)
+    def asset_type_duplicate(type_id: str, payload: Any = Body(...)):
+        d = body_dict(payload)
+        with lock:
+            h = hub()
+            return h.type_summary(h.duplicate_type(type_id, d.get("id"), d.get("name")))
+
+    @app.post("/api/asset-types/{type_id}/deploy", status_code=201)
+    def asset_type_deploy(type_id: str, payload: Any = Body(...)):
+        d = body_dict(payload)
+        with lock:
+            a = hub().deploy(type_id, d.get("name", ""), config=d.get("config"), asset_id=d.get("id"),
+                             position=d.get("position"), overrides=d.get("overrides"), local=d.get("local"),
+                             source=d.get("source"), target=d.get("target"))
+            return {**a.snapshot(), "industrial": hub().describe(a.id)}
+
+    @app.post("/api/asset-types/{type_id}/sync")
+    def asset_type_sync(type_id: str, dry_run: bool = False):
+        with lock:
+            return hub().sync_type_instances(type_id, dry_run=dry_run)
+
+    # ------------------------------------------------------------------ per-asset industrial profile
+    @app.get("/api/assets/{asset_id}/industrial")
+    def asset_industrial(asset_id: str):
+        with lock:
+            return hub().describe(asset_id)
+
+    @app.put("/api/assets/{asset_id}/parameters")
+    def asset_parameters(asset_id: str, payload: Any = Body(...)):
+        with lock:
+            return hub().set_parameters(asset_id, body_dict(payload))
+
+    @app.put("/api/assets/{asset_id}/overrides/{section}/{key}")
+    def asset_override_set(asset_id: str, section: str, key: str, payload: Any = Body(...)):
+        with lock:
+            return hub().set_item_override(asset_id, section, key, body_dict(payload))
+
+    @app.delete("/api/assets/{asset_id}/overrides/{section}/{key}")
+    def asset_override_reset(asset_id: str, section: str, key: str):
+        with lock:
+            return hub().reset_override(asset_id, section, key)
+
+    @app.put("/api/assets/{asset_id}/local")
+    def asset_local(asset_id: str, payload: Any = Body(...)):
+        with lock:
+            return hub().set_local(asset_id, body_dict(payload))
+
+    @app.post("/api/assets/{asset_id}/bind")
+    def asset_bind(asset_id: str, payload: Any = Body(...)):
+        d = body_dict(payload)
+        with lock:
+            return hub().attach_type(asset_id, d.get("type_id"), apply_config=bool(d.get("apply_config", True)))
+
+    @app.post("/api/assets/{asset_id}/unbind")
+    def asset_unbind(asset_id: str):
+        with lock:
+            return hub().detach_type(asset_id)
+
+    @app.post("/api/assets/{asset_id}/sync-type")
+    def asset_sync_type(asset_id: str, dry_run: bool = False):
+        with lock:
+            return hub().sync_instance(asset_id, dry_run=dry_run)
+
+    @app.get("/api/assets/{asset_id}/sync")
+    def asset_sync_get(asset_id: str):
+        with lock:
+            svc.sim.get_asset(asset_id)
+            return hub().sync_config(asset_id)
+
+    @app.put("/api/assets/{asset_id}/sync")
+    def asset_sync_set(asset_id: str, payload: Any = Body(...)):
+        with lock:
+            return hub().set_sync(asset_id, body_dict(payload))
+
+    @app.get("/api/assets/{asset_id}/measurements")
+    def asset_measurements(asset_id: str, measurement_id: str | None = None, since_seq: int | None = None,
+                           since_time: float | None = None, cycle_id: str | None = None,
+                           limit: int = Query(500, ge=1, le=20_000)):
+        with lock:
+            svc.sim.get_asset(asset_id)
+            store = hub().store
+            return {"latest": {m: o.to_dict() for m, o in store.latest_for(asset_id).items()},
+                    "observations": [o.to_dict() for o in store.query(
+                        asset_id=asset_id, measurement_id=measurement_id, since_seq=since_seq,
+                        since_time=since_time, cycle_id=cycle_id, limit=limit)]}
+
+    @app.get("/api/assets/{asset_id}/conditions")
+    def asset_conditions(asset_id: str, limit: int = Query(200, ge=1, le=10_000)):
+        with lock:
+            svc.sim.get_asset(asset_id)
+            h = hub()
+            return {"active": h.active_conditions(asset_id), "classification": h.classification(asset_id),
+                    "blocking": h.blocking_condition(asset_id), "log": h.condition_log(asset_id=asset_id, limit=limit)}
+
+    @app.get("/api/conditions/log")
+    def conditions_log(limit: int = Query(200, ge=1, le=10_000)):
+        with lock:
+            return hub().condition_log(limit=limit)
+
+    @app.post("/api/expressions/validate")
+    def expression_validate(payload: Any = Body(...)):
+        d = body_dict(payload)
+        with lock:
+            return hub().check_expression(d.get("expression"), asset_id=d.get("asset_id"),
+                                          type_id=d.get("type_id"), kind=d.get("kind"))
+
+    @app.get("/api/units")
+    def units():
+        return known_units()
+
+    # ------------------------------------------------------------------ external ingestion
+    @app.post("/api/ingestion/events")
+    def ingestion_events(payload: Any = Body(...)):
+        if isinstance(payload, list):
+            if len(payload) > 1000:
+                raise ValidationError("at most 1000 envelopes per request")
+            return {"results": [svc.ingest(e) for e in payload]}
+        return svc.ingest(payload)
+
+    @app.get("/api/ingestion/status")
+    def ingestion_status():
+        with lock:
+            return {**hub().ingestion.status(), "mqtt": svc.mqtt.info()}
+
+    @app.get("/api/ingestion/messages")
+    def ingestion_messages(limit: int = Query(100, ge=1, le=500), status: str | None = None):
+        with lock:
+            msgs = [m for m in hub().ingestion.messages if status is None or m.get("status") == status]
+            return msgs[-limit:]
+
+    @app.get("/api/ingestion/mqtt")
+    def mqtt_info():
+        return svc.mqtt.info()
+
+    @app.put("/api/ingestion/mqtt")
+    def mqtt_configure(payload: Any = Body(...)):
+        svc.mqtt.configure(body_dict(payload))
+        return svc.mqtt.info()
+
+    @app.post("/api/ingestion/mqtt/start")
+    def mqtt_start():
+        return svc.mqtt.start()
+
+    @app.post("/api/ingestion/mqtt/stop")
+    def mqtt_stop():
+        svc.mqtt.stop()
+        return svc.mqtt.info()
+
+    # ------------------------------------------------------------------ datasets
+    def ds():
+        return svc.sim.datasets
+
+    def _dataset_name(name: str) -> str:
+        if name not in DATASETS:
+            raise ValidationError(f"dataset must be one of {list(DATASETS)}")
+        return name
+
+    @app.get("/api/datasets")
+    def datasets_summary():
+        with lock:
+            return ds().summary()
+
+    @app.post("/api/datasets/sessions", status_code=201)
+    def dataset_create(payload: Any = Body(...)):
+        with lock:
+            return ds().create_session(body_dict(payload)).summary()
+
+    @app.get("/api/datasets/sessions/{sid}")
+    def dataset_get(sid: str):
+        with lock:
+            return ds().get(sid).summary()
+
+    @app.put("/api/datasets/sessions/{sid}")
+    def dataset_update(sid: str, payload: Any = Body(...)):
+        with lock:
+            return ds().update_session(sid, body_dict(payload)).summary()
+
+    @app.delete("/api/datasets/sessions/{sid}", status_code=204)
+    def dataset_delete(sid: str):
+        with lock:
+            ds().delete_session(sid)
+
+    @app.post("/api/datasets/sessions/{sid}/{action}")
+    def dataset_action(sid: str, action: str):
+        if action not in ("start", "pause", "resume", "stop", "clear"):
+            raise NotFoundError(f"unknown session action '{action}'")
+        with lock:
+            svc.sync_clock()
+            return getattr(ds(), action)(sid).summary()
+
+    @app.get("/api/datasets/sessions/{sid}/preview/{dataset}")
+    def dataset_preview(sid: str, dataset: str, limit: int = Query(50, ge=0, le=1000)):
+        with lock:
+            return ds().preview(sid, _dataset_name(dataset), limit)
+
+    @app.get("/api/datasets/sessions/{sid}/export/{dataset}")
+    def dataset_export(sid: str, dataset: str, format: str | None = None):
+        with lock:
+            data, name, mime = ds().export(sid, _dataset_name(dataset), format)
+        return Response(content=data, media_type=mime,
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    @app.get("/api/datasets/sessions/{sid}/manifest")
+    def dataset_manifest(sid: str):
+        with lock:
+            return ds().manifest(sid, list(ds().get(sid).config["datasets"]))
+
+    @app.get("/api/datasets/sessions/{sid}/bundle")
+    def dataset_bundle(sid: str, datasets: str | None = None, format: str | None = None):
+        names = [d.strip() for d in datasets.split(",") if d.strip()] if datasets else None
+        with lock:
+            data, name = ds().bundle(sid, names, format)
+        return Response(content=data, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     # ------------------------------------------------------------------ UI
     if WEB_DIR.is_dir():
