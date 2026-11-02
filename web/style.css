@@ -122,3 +122,13 @@ input[readonly] { opacity: .6; }
 .chip b { color: #8b93a1; font-weight: normal; }
 .chip.bad { background: #5c2323; color: #ffb3b3; }
 .hist details summary { cursor: pointer; }
+
+/* device API section */
+.hist.api td { vertical-align: top; }
+.hist.api code { font-size: 11px; word-break: break-all; }
+.method { display: inline-block; min-width: 44px; text-align: center; border-radius: 3px; padding: 0 4px; font-size: 10px; font-weight: bold; }
+.method.get { background: #1f4d6b; }
+.method.patch { background: #6b4d1f; }
+.method.post { background: #2f5236; }
+a.file-btn { text-decoration: none; color: inherit; }
+#ins-api a { color: #7cc4ff; }

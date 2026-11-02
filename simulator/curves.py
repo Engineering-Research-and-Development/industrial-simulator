@@ -66,8 +66,8 @@ class QualityModel:
     """
 
     q_at_1: float = 1.0
-    q_at_50: float = 0.95
-    q_at_100: float = 0.75
+    q_at_50: float = 0.999
+    q_at_100: float = 0.99
     steepness: float = 10.0
 
     @classmethod

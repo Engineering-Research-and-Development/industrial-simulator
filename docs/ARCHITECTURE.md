@@ -61,6 +61,8 @@ through listeners (`sim.listeners`, called with `(channel, payload)`) or queries
   It starts a cycle when every input buffer has the required quantities and all output buffers have room.
   * Processing time is `recipe.processing_time_s × speed_multiplier(speed_pct)`.
   * Quality is `quality(speed_pct)`, and the defect probability is `1 − quality`.
+    The default curve is 1.0 at 1 % speed, 0.999 at 50 % and 0.99 at 100 %
+    (0.1 % defects at half speed, 1 % at full speed). Each transformer can override it with `quality_model`.
   * `defect_policy` is either `any_defective_input` (default: defects cascade, so outputs are defective if any
     consumed input was defective, otherwise drawn from machine quality) or `independent` (each output is drawn from
     machine quality only, ignoring input defects). Output history records `defect_cause`

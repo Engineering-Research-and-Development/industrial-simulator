@@ -87,7 +87,25 @@ mid-cycle (C) and blocked/failed downstream (D).
 
 ## REST API (selection)
 
-Interactive OpenAPI docs are at `/docs`.
+Interactive OpenAPI docs are at `/docs` (also linked from the **API docs** toolbar button); ReDoc is at `/redoc` and the raw schema at `/openapi.json`.
+
+### Finding the API for a device
+
+Select a machine on the canvas and open **API for this device** in the inspector. It lists every endpoint for that asset with its real ID, and a **curl** button copies a ready-to-run command for each one. The main per-device routes are:
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/assets/{id}` | State, config, counters, statistics |
+| GET | `/api/assets/{id}/stats` | Statistics only |
+| GET | `/api/assets/{id}/operational-history` | State intervals |
+| GET | `/api/events?asset_id={id}` | Machine events |
+| GET | `/api/config-changes?asset_id={id}` | Versioned config changes |
+| GET | `/api/cycles?asset_id={id}` | Production cycles (producers, transformers) |
+| GET | `/api/assets/{id}/products` | Received products (sinks) |
+| PATCH | `/api/assets/{id}/config` | Partial config update, e.g. `{"speed_pct": 70}` |
+| POST | `/api/assets/{id}/commands` | `{"command": "start" \| "stop" \| "fault" \| "restart"}` |
+
+When a broker adapter is enabled, the device publishes on `<topic_prefix>.machine`, `.product` and `.config`, using the asset ID as the message key.
 
 | Area | Endpoints |
 |---|---|
