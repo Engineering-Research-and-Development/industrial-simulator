@@ -268,6 +268,39 @@ document.querySelectorAll("#palette button[data-kind]").forEach((b) => b.addEven
 }));
 
 // ------------------------------------------------------------------ inspector
+// Per-device REST endpoints and broker topics, shown in the inspector.
+const EXAMPLE_PATCH = { producer: ["interval", 30], transformer: ["speed_pct", 70], splitter: ["percentage_a", 60],
+  sink: ["capacity", 100], conveyor: ["speed_m_s", 1] };
+function deviceApiHtml(a, integ) {
+  const base = location.origin, id = encodeURIComponent(a.id), q = (s) => `'${s.replace(/'/g, "'\\''")}'`;
+  const [k, dflt] = EXAMPLE_PATCH[a.kind] || ["name", a.name];
+  const patch = JSON.stringify({ [k]: a.config?.[k] ?? dflt });
+  const rows = [
+    ["GET", `/api/assets/${id}`, "State, config, counters, statistics"],
+    ["GET", `/api/assets/${id}/stats`, "Statistics only"],
+    ["GET", `/api/assets/${id}/operational-history?limit=50`, "State intervals (running, idle, blocked...)"],
+    ["GET", `/api/events?asset_id=${id}&limit=50`, "Machine events"],
+    ["GET", `/api/config-changes?asset_id=${id}`, "Versioned configuration changes"],
+    ...(a.kind === "transformer" || a.kind === "producer" ? [["GET", `/api/cycles?asset_id=${id}&limit=20`, "Production cycles"]] : []),
+    ...(a.kind === "sink" ? [["GET", `/api/assets/${id}/products?limit=50`, "Received products"]] : []),
+    ["PATCH", `/api/assets/${id}/config`, "Change configuration (only the keys you send)", patch],
+    ["POST", `/api/assets/${id}/commands`, "Command: start | stop | fault | restart", '{"command":"stop"}'],
+  ];
+  const curl = ([m, path, , body]) => body
+    ? `curl -X ${m} ${base}${path} -H "Content-Type: application/json" -d ${q(body)}`
+    : `curl ${q(base + path)}`;
+  const active = integ && integ.adapter && integ.adapter !== "none";
+  const prefix = (integ && integ.topic_prefix) || "industrial-sim";
+  return `<details class="section" id="ins-api" ${SECTION_OPEN.deviceApi ? "open" : ""}><summary>API for this device</summary>
+    <p class="hint">Full interactive reference: <a href="/docs" target="_blank" rel="noopener">${esc(base)}/docs</a> (OpenAPI JSON at <code>/openapi.json</code>).</p>
+    <table class="hist api">${rows.map((r) => `<tr><td><span class="method ${r[0].toLowerCase()}">${r[0]}</span></td>
+      <td>${r[0] === "GET" ? `<a href="${esc(r[1])}" target="_blank" rel="noopener"><code>${esc(r[1])}</code></a>` : `<code>${esc(r[1])}</code>`}
+        <div class="hint">${esc(r[2])}${r[3] ? ` · body <code>${esc(r[3])}</code>` : ""}</div></td>
+      <td><button class="small" data-copy="${esc(curl(r))}" title="Copy curl command">curl</button></td></tr>`).join("")}</table>
+    <p class="hint">Broker messages ${active ? `(${esc(integ.adapter)} adapter active)` : "(enable an adapter in the Integration tab)"}:
+      topics <code>${esc(prefix)}.machine</code>, <code>${esc(prefix)}.product</code>, <code>${esc(prefix)}.config</code>
+      with message key <code>${esc(a.id)}</code>.</p></details>`;
+}
 function select(id) { selectedId = id; inspectorDirty = false; showTab("inspector"); renderInspector(true); }
 async function renderInspector(force = false) {
   const el = $("#tab-inspector");
@@ -280,6 +313,7 @@ async function renderInspector(force = false) {
   const ops = await api("GET", `/api/assets/${encodeURIComponent(a.id)}/operational-history?limit=15`).catch(() => []);
   const changes = await api("GET", `/api/config-changes?asset_id=${encodeURIComponent(a.id)}&limit=10`).catch(() => []);
   const ctx = await loadCtx().catch(() => ({ types: [], recipes: [], orders: [] }));
+  const integ = await api("GET", "/api/integration").catch(() => null);
   if (!force && (inspectorDirty || el.contains(document.activeElement))) return;
   const scroll = el.dataset.assetId === a.id ? el.scrollTop : 0;
   el.dataset.assetId = a.id;
@@ -305,6 +339,7 @@ async function renderInspector(force = false) {
       <textarea id="ins-config" rows="10">${esc(JSON.stringify(a.config, null, 2))}</textarea>
       <div class="row"><button id="ins-apply-json">Apply JSON</button></div></details>
     ${a.kind === "sink" ? '<h4>Received products</h4><div class="row"><select id="sink-filter"><option value="">all</option><option value="completed=true">completed</option><option value="completed=false">stored</option><option value="defective=true">defective</option></select><button id="sink-list">List</button></div><div id="sink-products" class="log"></div>' : ""}
+    ${deviceApiHtml(a, integ)}
     <h4>Statistics</h4><div class="kv stats">${Object.entries(a.stats || {}).map(([k, v]) =>
       `<div>${esc(k.replace(/_/g, " "))}</div><div>${esc(typeof v === "number" ? +v.toFixed(3) : showValue(v) || "–")}</div>`).join("")}</div>
     <h4>Operational history (latest)</h4>
@@ -316,6 +351,11 @@ async function renderInspector(force = false) {
   const form = buildForm(ASSET_SCHEMAS[a.kind] || [], a.config, ctx, ASSET_PREVIEWS[a.kind]);
   $("#ins-form").append(form.el);
   $("#ins-raw").addEventListener("toggle", () => (SECTION_OPEN.rawJson = $("#ins-raw").open));
+  $("#ins-api").addEventListener("toggle", () => (SECTION_OPEN.deviceApi = $("#ins-api").open));
+  $("#ins-api").addEventListener("click", (ev) => {
+    const b = ev.target.closest("button[data-copy]"); if (!b) return;
+    navigator.clipboard.writeText(b.dataset.copy).then(() => toast("Copied", true), () => toast("Copy failed"));
+  });
   el.scrollTop = scroll;
   for (const ev of ["input", "change"]) {
     $("#ins-form").addEventListener(ev, () => (inspectorDirty = true));

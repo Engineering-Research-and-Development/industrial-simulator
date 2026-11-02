@@ -68,8 +68,8 @@ def test_speed_and_quality_curves():
     assert sm.multiplier(50) == pytest.approx(1.0)
     assert sm.multiplier(100) == pytest.approx(0.5)
     assert qm.quality(1) == pytest.approx(1.0)
-    assert qm.quality(50) == pytest.approx(0.95)
-    assert qm.quality(100) == pytest.approx(0.75)
+    assert qm.quality(50) == pytest.approx(0.999)
+    assert qm.quality(100) == pytest.approx(0.99)
     qs = [qm.quality(s) for s in range(1, 101)]
     assert all(a >= b - 1e-12 for a, b in zip(qs, qs[1:]))      # monotonically non-increasing
     ms = [sm.multiplier(s) for s in range(1, 101)]
@@ -81,6 +81,7 @@ def test_speed_and_quality_curves():
 
 def test_quality_drives_defect_rate():
     sim = smelter(speed=100, processing=1, ore_interval=0.5, coal_interval=0.25, seed=3)
+    sim.update_config("t", {"quality_model": {"q_at_1": 1.0, "q_at_50": 0.95, "q_at_100": 0.75}})
     sim.start()
     sim.run_until(2000)
     metal = [sim.products[p] for p in sim.get_asset("sm").received]

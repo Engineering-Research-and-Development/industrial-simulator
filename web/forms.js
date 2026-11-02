@@ -249,7 +249,7 @@ function speedMultiplier(points, s) {
   return pts[pts.length - 1][1];
 }
 function qualityAt(q, speed) {
-  const m = { q_at_1: 1, q_at_50: 0.95, q_at_100: 0.75, steepness: 10, ...(q || {}) };
+  const m = { q_at_1: 1, q_at_50: 0.999, q_at_100: 0.99, steepness: 10, ...(q || {}) };
   const s = Math.min(100, Math.max(1, speed));
   if (s <= 50) return m.q_at_1 + (m.q_at_50 - m.q_at_1) * (s - 1) / 49;
   const x = (s - 50) / 50, k = m.steepness, sig = (z) => 1 / (1 + Math.exp(-z));
@@ -293,9 +293,9 @@ const ASSET_SCHEMAS = {
       { key: "speed_model", label: "Cycle time", type: "object", fields: [{ key: "points", label: "", type: "speedPoints" }],
         help: "Processing-time multiplier at each speed (linear in between)" },
       { key: "quality_model", label: "Quality", type: "object", fields: [
-        { key: "q_at_1", label: "at 1 %", type: "number", min: 0, max: 1, step: 0.01 },
-        { key: "q_at_50", label: "at 50 %", type: "number", min: 0, max: 1, step: 0.01 },
-        { key: "q_at_100", label: "at 100 %", type: "number", min: 0, max: 1, step: 0.01 },
+        { key: "q_at_1", label: "at 1 %", type: "number", min: 0, max: 1, step: 0.001 },
+        { key: "q_at_50", label: "at 50 %", type: "number", min: 0, max: 1, step: 0.001 },
+        { key: "q_at_100", label: "at 100 %", type: "number", min: 0, max: 1, step: 0.001 },
         { key: "steepness", label: "Steepness", type: "number", min: 0.1, max: 100, step: "any" }] }] },
     { section: "Advanced", collapsed: true, fields: [STATE_FIELD] },
   ],
@@ -322,7 +322,7 @@ const ASSET_DEFAULTS = {
   producer: (c) => ({ product_type_id: c.types[0]?.id, batch_quantity: 1, interval: 10, interval_unit: "seconds",
     max_pending_batches: 1, production_order_id: c.orders[0]?.id, defect_probability: 0, start_delay_s: 0, attributes: {}, initial_state: "running" }),
   transformer: (c) => ({ recipe_id: c.recipes[0]?.id ?? null, speed_pct: 50, input_buffer_multiplier: 2, output_buffer_multiplier: 2,
-    speed_model: { points: [[1, 2], [50, 1], [100, 0.5]] }, quality_model: { q_at_1: 1, q_at_50: 0.95, q_at_100: 0.75, steepness: 10 }, initial_state: "running" }),
+    speed_model: { points: [[1, 2], [50, 1], [100, 0.5]] }, quality_model: { q_at_1: 1, q_at_50: 0.999, q_at_100: 0.99, steepness: 10 }, initial_state: "running" }),
   splitter: () => ({ mode: "percentage", percentage_a: 50, rules: [], fallback_branch: "B", buffer_capacity: 1, initial_state: "running" }),
   sink: () => ({ accepted_product_type_ids: null, capacity: null, completion_criteria: [], initial_state: "running" }),
 };
@@ -342,7 +342,7 @@ const ASSET_PREVIEWS = {
     const mult = speedMultiplier(v.speed_model?.points, v.speed_pct), q = qualityAt(v.quality_model, v.speed_pct);
     const head = r ? `<div>${esc(itemsText(c, r.inputs))} → ${esc(itemsText(c, r.outputs))}</div>` : '<div class="bad">No recipe – the transformer stays unconfigured</div>';
     return head + `<div>Cycle ${r ? `<b>${n2(r.processing_time_s * mult, 1)} s</b> (${r.processing_time_s} s × ${n2(mult)})` : `time × ${n2(mult)}`}
-      · quality <b>${n2(q, 3)}</b> · defect chance <b>${n2((1 - q) * 100, 1)} %</b></div>`;
+      · quality <b>${n2(q, 4)}</b> · defect chance <b>${n2((1 - q) * 100, 2)} %</b></div>`;
   },
   splitter: (v) => (v.mode === "percentage" ? `A: <b>${n2(v.percentage_a, 1)} %</b> · B: <b>${n2(100 - v.percentage_a, 1)} %</b>` : ""),
 };
