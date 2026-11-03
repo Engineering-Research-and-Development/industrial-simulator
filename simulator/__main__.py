@@ -26,7 +26,7 @@ def main() -> None:
     ckpt_dir = Path(args.checkpoint_dir) if args.checkpoint_dir else None
     if ckpt_dir is not None:
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-    service = SimulationService(sim, checkpoint_dir=ckpt_dir)
+    service = SimulationService(sim, checkpoint_dir=ckpt_dir, scenario_id=args.scenario or None)
     uvicorn.run(create_app(service), host=args.host, port=args.port, log_level="info")
 
 

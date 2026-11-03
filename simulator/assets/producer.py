@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections import deque
 from typing import Any, Iterable
 
-from ..errors import ValidationError
+from ..errors import ConflictError, ValidationError
 from ..ids import validate_id
 from ..models import ProductStatus, require_positive_int, require_positive_number
 from ..scheduler import Priority
@@ -56,6 +56,8 @@ class Producer(Asset):
         attrs = raw.get("attributes") or {}
         if not isinstance(attrs, dict):
             raise ValidationError("attributes must be an object")
+        from ..industrial.definitions import normalize_mappings
+        mappings = normalize_mappings(raw.get("attribute_mappings"))
         return {
             "product_type_id": ptid,
             "batch_quantity": require_positive_int(raw.get("batch_quantity", 1), "batch_quantity"),
@@ -66,6 +68,7 @@ class Producer(Asset):
             "defect_probability": float(dp),
             "start_delay_s": float(delay),
             "attributes": dict(attrs),
+            "attribute_mappings": mappings,
             "initial_state": parse_initial_state(raw),
         }
 
@@ -89,6 +92,9 @@ class Producer(Asset):
     # ------------------------------------------------------------------ scheduling
     def activate(self) -> None:
         if self.is_operational():
+            if self.sim.industrial.production_external(self.id):
+                self.set_state(IDLE, "awaiting external production")
+                return
             self.set_state(RUNNING)
             self._schedule_tick(self.sim.now + self.config["start_delay_s"])
 
@@ -101,7 +107,13 @@ class Producer(Asset):
         self._tick_event = None
 
     def on_restart(self) -> None:
-        if self.sim.started:
+        if self.sim.started and not self.sim.industrial.production_external(self.id):
+            self._schedule_tick(self.sim.now)
+
+    def on_sync_changed(self) -> None:
+        if self.sim.industrial.production_external(self.id):
+            self.on_stop("external production")
+        elif self.sim.started and self.is_operational() and self._tick_event is None:
             self._schedule_tick(self.sim.now)
 
     def on_event(self, kind: str, payload: Any) -> None:
@@ -110,7 +122,20 @@ class Producer(Asset):
         self._tick_event = None
         if not self.is_operational():
             return
-        self._schedule_tick(self.sim.now + self.interval_s)
+        hub = self.sim.industrial
+        if hub.production_external(self.id):
+            return
+        ind = hub.cycle_features(self)
+        interval = ind["features"]["interval_s"] if ind else self.interval_s
+        self._schedule_tick(self.sim.now + interval)
+        blocking = hub.blocking_condition(self.id)
+        if blocking:
+            self.skipped_ticks += 1
+            self.sim.emit("production_skipped", self, error=f"blocked by working condition '{blocking}'",
+                          details={"condition_id": blocking})
+            self.wake()
+            return
+        qty = ind["features"]["batch_quantity"] if ind else self.config["batch_quantity"]
         limit = self.config["max_pending_batches"] * self.config["batch_quantity"]
         if len(self.pending) >= limit:
             self.skipped_ticks += 1
@@ -118,36 +143,76 @@ class Producer(Asset):
                           details={"pending": len(self.pending), "limit": limit})
             self.wake()
             return
-        self._generate_batch()
+        self._generate_batch(ind, quantity=qty)
         self.wake()
 
-    def _generate_batch(self) -> None:
+    def _generate_batch(self, ind: dict | None = None, *, quantity: int | None = None,
+                        external: dict | None = None) -> list[str]:
         sim = self.sim
+        hub = sim.industrial
         cfg = self.config
         self.batch_seq += 1
         lot = f"LOT-{self.id}-{self.batch_seq:05d}"
         order = cfg["production_order_id"]
         snapshot = {k: v for k, v in cfg.items() if k != "initial_state"}
         snapshot["interval_s"] = self.interval_s
+        p_defect = cfg["defect_probability"]
+        if ind is not None:
+            snapshot["industrial"] = ind
+            snapshot["interval_s"] = ind["features"]["interval_s"]
+            snapshot["batch_quantity"] = ind["features"]["batch_quantity"]
+            p_defect = snapshot["defect_probability"] = ind["features"]["defect_probability"]
+        specs = list((external or {}).get("outputs") or [])
+        qty = len(specs) if specs else (quantity or cfg["batch_quantity"])
+        if specs:
+            snapshot["batch_quantity"] = qty
         cycle = sim.new_cycle(self, "producer_batch", lot, [order], snapshot)
+        if external is not None:
+            cycle.source = "external"
+            cycle.external_cycle_id = external.get("cycle_id")
+            cycle.external_timestamps = {"completed": external.get("timestamp")}
+            cycle.exceptions = list(external.get("exceptions") or [])
+        if ind is not None:
+            hub.on_cycle_started(self, cycle)
+        details = {"lot_number": lot, "batch_index": self.batch_seq}
+        if cycle.source == "external":
+            details.update(source="external", external_cycle_id=cycle.external_cycle_id)
         sim.emit("production_started", self, cycle_id=cycle.id, production_order_ids=[order],
-                 config=snapshot, details={"lot_number": lot, "batch_index": self.batch_seq})
+                 config=snapshot, details=details)
+        if hub.active(self.id):
+            hub.on_cycle_ending(self, cycle)
+        pt = sim.product_types.get(cfg["product_type_id"])
+        map_attrs = bool(cfg["attribute_mappings"] or (pt is not None and pt.attributes))
+        features = {"interval_s": snapshot["interval_s"], "batch_quantity": qty, "defect_probability": p_defect}
         ids = []
         defects = 0
-        for _ in range(cfg["batch_quantity"]):
-            defective = cfg["defect_probability"] > 0 and sim.rng.random() < cfg["defect_probability"]
+        for u in range(qty):
+            spec = specs[u] if specs else {}
+            if isinstance(spec.get("is_defective"), bool):
+                defective = spec["is_defective"]
+            else:
+                defective = p_defect > 0 and sim.rng.random() < p_defect
             defects += int(defective)
+            provenance = None
+            if map_attrs or spec.get("attributes"):
+                attrs, provenance = hub.resolve_attributes(
+                    self, product_type_id=cfg["product_type_id"], mappings=cfg["attribute_mappings"], cycle=cycle,
+                    features=features, static=cfg["attributes"], slot=0, unit_index=u,
+                    external=spec.get("attributes"))
+            else:
+                attrs = dict(cfg["attributes"])
             product = sim.create_product(
                 type_id=cfg["product_type_id"], lot=lot, order_ids=[order], cycle_id=cycle.id,
-                parent_ids=[], is_defective=defective, attributes=dict(cfg["attributes"]),
+                parent_ids=[], is_defective=defective, attributes=attrs, attribute_provenance=provenance,
+                external_id=spec.get("product_id"),
             )
             self.place(product, "output_buffer", "out", ProductStatus.QUEUED)
-            entry = sim.new_history_entry(
-                product, self, start=sim.now, cycle_id=cycle.id,
-                attributes={"interval_s": self.interval_s, "batch_quantity": cfg["batch_quantity"],
-                            "batch_index": self.batch_seq, "lot_number": lot, "is_defective": defective,
-                            "config_version": self.config_version},
-            )
+            hist = {"interval_s": snapshot["interval_s"], "batch_quantity": qty,
+                    "batch_index": self.batch_seq, "lot_number": lot, "is_defective": defective,
+                    "config_version": self.config_version}
+            if ind is not None:
+                hist.update(working_conditions=ind["working_conditions"], classification=ind["classification"])
+            entry = sim.new_history_entry(product, self, start=sim.now, cycle_id=cycle.id, attributes=hist)
             entry.complete(sim.now)
             self.pending.append(product.id)
             ids.append(product.id)
@@ -155,7 +220,27 @@ class Producer(Asset):
         sim.finish_cycle(cycle, input_ids=[], output_ids=ids, defect_count=defects)
         sim.emit("product_generated", self, cycle_id=cycle.id, production_order_ids=[order],
                  output_product_ids=ids, output_quantity=len(ids), defect_count=defects,
-                 timestamp_start=sim.now, timestamp_end=sim.now, details={"lot_number": lot})
+                 timestamp_start=sim.now, timestamp_end=sim.now,
+                 details={k: v for k, v in details.items() if k != "batch_index"})
+        return ids
+
+    def produce_external_batch(self, *, cycle_id: str | None, outputs: list[dict] | None, strict: bool,
+                               timestamp: Any = None) -> list[str]:
+        """Record a batch reported by an external system (validated before any mutation)."""
+        if not self.is_operational():
+            raise ConflictError(f"producer '{self.id}' is {self.state}")
+        exceptions = []
+        for k, spec in enumerate(outputs or []):
+            t = spec.get("product_type_id")
+            if t is not None and t != self.config["product_type_id"]:
+                exceptions.append(f"output #{k} type '{t}' differs from configured '{self.config['product_type_id']}'")
+        if exceptions and strict:
+            raise ValidationError("external batch does not match the producer: " + "; ".join(exceptions))
+        ind = self.sim.industrial.cycle_features(self)
+        ids = self._generate_batch(ind, external={"cycle_id": cycle_id, "outputs": outputs, "timestamp": timestamp,
+                                                  "exceptions": exceptions})
+        self.wake()
+        return ids
 
     def wake(self) -> None:
         if not self.is_operational():
@@ -164,6 +249,10 @@ class Producer(Asset):
         if self.pending:
             reason = "no output conveyor" if "out" not in self.outputs else "output conveyor full"
             self.set_state(BLOCKED, reason)
+        elif self.sim.industrial.production_external(self.id):
+            self.set_state(IDLE, "awaiting external production")
+        elif (blocking := self.sim.industrial.blocking_condition(self.id)):
+            self.set_state(BLOCKED, f"working condition '{blocking}'")
         else:
             self.set_state(RUNNING if self.sim.started else IDLE)
 

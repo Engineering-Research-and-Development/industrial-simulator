@@ -27,6 +27,7 @@ Listener = Callable[[str, dict], None]
 class Simulation:
     def __init__(self, seed: int | None = None, *, event_log_limit: int | None = None, name: str = "untitled") -> None:
         self.name = name
+        self.description = ""
         self.seed = seed
         self.now = 0.0
         self.started = False
@@ -54,6 +55,10 @@ class Simulation:
         self.listener_errors = 0
         self.default_order_id = DEFAULT_ORDER_ID
         self.orders[DEFAULT_ORDER_ID] = ProductionOrder(DEFAULT_ORDER_ID, "Default production order")
+        from .industrial.datasets import DatasetCollector
+        from .industrial.hub import IndustrialHub
+        self.industrial = IndustrialHub(self)
+        self.datasets = DatasetCollector(self)
 
     # ------------------------------------------------------------------ pickling (checkpoints)
     def __getstate__(self) -> dict:
@@ -75,6 +80,7 @@ class Simulation:
             raise ValidationError("product type IDs are immutable")
         merged = {**current.to_dict(), **data, "id": type_id}
         pt = ProductType.from_dict(merged)
+        self.check_attribute_mappings(product_types={**self.product_types, type_id: pt})
         self.product_types[type_id] = pt
         self._record_change(f"product-type:{type_id}", current.to_dict(), pt.to_dict(), 0, "immediate (descriptive)")
         return pt
@@ -99,6 +105,7 @@ class Simulation:
         r = Recipe.from_dict(data, set(self.product_types))
         if r.id in self.recipes:
             raise ConflictError(f"recipe '{r.id}' already exists")
+        self.check_recipe_mappings(r)
         self.recipes[r.id] = r
         return r
 
@@ -107,6 +114,7 @@ class Simulation:
         if "id" in data and data["id"] != recipe_id:
             raise ValidationError("recipe IDs are immutable")
         r = Recipe.from_dict({**current.to_dict(), **data, "id": recipe_id}, set(self.product_types))
+        self.check_recipe_mappings(r)
         users = [a for a in self.assets.values() if isinstance(a, Transformer) and a.config["recipe_id"] == recipe_id]
         for t in users:
             t.check_recipe_compatible(r)
@@ -125,6 +133,26 @@ class Simulation:
         if users:
             raise ConflictError(f"recipe '{recipe_id}' is used by {', '.join(users)}")
         del self.recipes[recipe_id]
+
+    def check_recipe_mappings(self, recipe: Recipe, product_types: dict | None = None) -> None:
+        from .industrial.definitions import check_mappings_against_type
+        types = product_types if product_types is not None else self.product_types
+        for j, o in enumerate(recipe.outputs):
+            if o.attribute_mappings:
+                check_mappings_against_type(o.attribute_mappings, types[o.product_type_id].attributes,
+                                            f"recipe '{recipe.id}' outputs[{j}]")
+
+    def check_attribute_mappings(self, *, product_types: dict | None = None) -> None:
+        """Re-validate every attribute mapping (recipes and producers) against product type attributes."""
+        from .industrial.definitions import check_mappings_against_type
+        types = product_types if product_types is not None else self.product_types
+        for r in self.recipes.values():
+            self.check_recipe_mappings(r, types)
+        for a in self.assets.values():
+            if isinstance(a, Producer) and a.config.get("attribute_mappings"):
+                check_mappings_against_type(a.config["attribute_mappings"],
+                                            types[a.config["product_type_id"]].attributes,
+                                            f"producer '{a.id}' attribute_mappings")
 
     def get_recipe(self, recipe_id: str) -> Recipe:
         try:
@@ -178,6 +206,11 @@ class Simulation:
             raise ValidationError(f"unknown asset kind '{kind}' (expected one of {list(ASSET_KINDS)} or conveyor)")
         aid = self._check_new_asset(asset_id, kind, name)
         asset = cls(self, aid, name.strip(), config or {}, position)
+        if isinstance(asset, Producer) and asset.config.get("attribute_mappings"):
+            from .industrial.definitions import check_mappings_against_type
+            check_mappings_against_type(asset.config["attribute_mappings"],
+                                        self.product_types[asset.config["product_type_id"]].attributes,
+                                        f"producer '{aid}' attribute_mappings")
         self.assets[aid] = asset
         if self.started:
             asset.activate()
@@ -237,6 +270,7 @@ class Simulation:
                 self.request_wake(src.id)
             if dst:
                 dst.inputs.pop(asset.target[1], None)
+            self.industrial.on_asset_removed(asset_id)
             del self.assets[asset_id]
             return
         if not asset.is_empty():
@@ -250,6 +284,7 @@ class Simulation:
         for c in attached:
             self.remove_asset(c)
         asset.on_stop("removed")
+        self.industrial.on_asset_removed(asset_id)
         del self.assets[asset_id]
 
     def rename_asset(self, asset_id: str, name: str) -> Asset:
@@ -268,10 +303,16 @@ class Simulation:
         except (KeyError, TypeError, ValueError):
             raise ValidationError("position must be {x: number, y: number}") from None
 
-    def update_config(self, asset_id: str, patch: dict) -> dict:
+    def update_config(self, asset_id: str, patch: dict, *, origin: str = "user") -> dict:
+        """Apply a validated configuration patch.
+
+        ``origin`` is 'user' (UI/API), 'template' (asset type synchronisation) or 'external'
+        (external system). User edits are rejected while configuration is externally driven.
+        """
         asset = self.get_asset(asset_id)
         if not isinstance(patch, dict) or not patch:
             raise ValidationError("configuration patch must be a non-empty object")
+        self.industrial.before_config_update(asset, patch, origin)
         forbidden = {"id", "asset_id", "name", "kind"} & set(patch)
         if forbidden:
             raise ValidationError(f"{sorted(forbidden)} cannot be changed through configuration; use rename")
@@ -281,6 +322,11 @@ class Simulation:
         old = copy.deepcopy(asset.config)
         new = type(asset).parse_config({**old, **copy.deepcopy(patch)}, self)  # full validation, no mutation
         asset.check_config_change(old, new)
+        if isinstance(asset, Producer) and new.get("attribute_mappings"):
+            from .industrial.definitions import check_mappings_against_type
+            check_mappings_against_type(new["attribute_mappings"],
+                                        self.product_types[new["product_type_id"]].attributes,
+                                        f"producer '{asset_id}' attribute_mappings")
         changed = {k for k in new if old.get(k) != new[k]}
         if not changed:
             return {"asset_id": asset_id, "version": asset.config_version, "changes": {}}
@@ -288,9 +334,10 @@ class Simulation:
         asset.config_version += 1
         boundary = asset.effective_boundary(changed)
         change = self._record_change(asset_id, old, new, asset.config_version, boundary)
+        self.industrial.after_config_update(asset, changed, origin)
         self.emit("configuration_changed", asset, config={k: new[k] for k in changed},
                   details={"changes": change.changes, "config_version": asset.config_version,
-                           "effective": boundary})
+                           "effective": boundary, "origin": origin})
         asset.on_config_changed(old, new)
         return change.to_dict()
 
@@ -314,6 +361,8 @@ class Simulation:
             asset.activate()
         for aid in list(self.assets):
             self.request_wake(aid)
+        self.industrial.activate()
+        self.datasets.activate()
 
     def request_wake(self, asset_id: str) -> None:
         if asset_id in self._pending_wakes or asset_id not in self.assets:
@@ -367,6 +416,12 @@ class Simulation:
             if asset is not None:
                 asset.wake()
             return
+        if ev.kind.startswith("ind:"):
+            self.industrial.handle_event(ev)
+            return
+        if ev.kind.startswith("ds:"):
+            self.datasets.handle_event(ev)
+            return
         if asset is not None:
             asset.on_event(ev.kind, ev.payload)
 
@@ -376,13 +431,15 @@ class Simulation:
     # ================================================================== products & records
     def create_product(self, *, type_id: str, lot: str, order_ids: list[str], cycle_id: str,
                        parent_ids: list[str], is_defective: bool, quality_score: float | None = None,
-                       attributes: dict | None = None) -> Product:
+                       attributes: dict | None = None, attribute_provenance: dict | None = None,
+                       external_id: str | None = None) -> Product:
         self._label_seq[type_id] += 1
         p = Product(
             id=self.ids.new("PRD"), label=f"{type_id}-{self._label_seq[type_id]:06d}", product_type_id=type_id,
             lot_number=lot, production_timestamp=self.now, status=ProductStatus.QUEUED, location=None,
             is_defective=is_defective, production_order_ids=list(order_ids), origin_cycle_id=cycle_id,
             parent_ids=list(parent_ids), quality_score=quality_score, attributes=dict(attributes or {}),
+            attribute_provenance=dict(attribute_provenance or {}), external_id=external_id,
         )
         self.products[p.id] = p
         self.active_product_ids.add(p.id)
@@ -430,6 +487,7 @@ class Simulation:
         cycle.output_ids = list(output_ids)
         cycle.defect_count = defect_count
         cycle.end_reason = "completed"
+        self.datasets.on_cycle_finished(cycle)
 
     def emit(self, event_type: str, asset: Asset, **fields: Any) -> MachineEvent:
         self._event_seq += 1
@@ -526,6 +584,8 @@ class Simulation:
                            "origin_cycle_id": p.origin_cycle_id, "operations": transformation_cycles},
             "history": self.full_history(product_id),
             "additional_attributes": dict(p.attributes),
+            "attribute_provenance": copy.deepcopy(p.attribute_provenance),
+            "external_id": p.external_id,
             "lineage": self.lineage_tree(product_id),
         }
 
@@ -668,7 +728,7 @@ class Simulation:
         if len(self.products) != self.counters["created"]:
             violations.append("product registry size differs from created count")
         for c in self.cycles.values():
-            if c.kind == "transformation" and c.status == "completed":
+            if c.kind == "transformation" and c.status == "completed" and not c.exceptions:
                 recipe = c.config_snapshot["recipe"]
                 need_in = sum(i["quantity"] for i in recipe["inputs"])
                 need_out = sum(o["quantity"] for o in recipe["outputs"])
@@ -700,12 +760,14 @@ class Simulation:
     def snapshot(self) -> dict:
         return {"name": self.name, "seed": self.seed, "time": self.now, "started": self.started,
                 "assets": [a.snapshot() for a in self.assets.values()], "metrics": self.metrics(),
-                "last_event_seq": self._event_seq, "next_event_time": self.next_event_time()}
+                "last_event_seq": self._event_seq, "next_event_time": self.next_event_time(),
+                "industrial": self.industrial.snapshot_summary()}
 
     def pending_operations(self) -> dict:
         active_cycles = [c.to_dict() for c in self.cycles.values() if c.status == "active"]
         upcoming = [{"time": e.time, "kind": e.kind, "asset_id": e.target}
-                    for e in self.scheduler.pending()[:100] if e.kind != "wake"]
+                    for e in self.scheduler.pending()[:500]
+                    if e.kind != "wake" and not e.kind.startswith(("ind:", "ds:"))][:100]
         return {"active_cycles": active_cycles, "scheduled_events": upcoming}
 
     def iter_assets(self, kind: type | None = None) -> Iterable[Asset]:

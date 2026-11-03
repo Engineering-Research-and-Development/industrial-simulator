@@ -165,9 +165,16 @@ class Asset:
         """Working conditions recorded with operational-history intervals."""
         return {"config_version": self.config_version}
 
+    def _interval_conditions(self) -> dict:
+        cond = self.conditions()
+        hub = getattr(self.sim, "industrial", None)
+        if hub is not None:
+            cond.update(hub.interval_conditions(self.id))
+        return cond
+
     def _open_interval(self) -> None:
         self._interval = OperationalInterval(self.id, self.state, self.sim.now, None,
-                                             self.state_reason, self.conditions())
+                                             self.state_reason, self._interval_conditions())
         self.sim.operational_history.setdefault(self.id, []).append(self._interval)
 
     def set_state(self, state: str, reason: str | None = None, *, force_record: bool = False) -> None:
@@ -178,7 +185,7 @@ class Asset:
         if iv is not None and state == previous and iv.start == self.sim.now and iv.end is None:
             # Same state re-labelled at the same instant: amend instead of recording a 0 s interval.
             self.state_reason = iv.reason = reason
-            iv.conditions = self.conditions()
+            iv.conditions = self._interval_conditions()
             return
         if self._interval is not None:
             self._interval.end = self.sim.now

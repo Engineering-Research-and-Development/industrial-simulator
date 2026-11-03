@@ -204,6 +204,10 @@ class Transformer(Asset):
         if r is None:
             self.set_state(UNCONFIGURED, "no recipe selected")
             return
+        hub = self.sim.industrial
+        if hub.production_external(self.id):
+            self.set_state(IDLE, "awaiting external cycle start")
+            return
         missing = [IN_PORTS[i] for i, item in enumerate(r.inputs)
                    if len(self.input_buffers[i]) < item.quantity]
         full = [OUT_PORTS[j] for j, item in enumerate(r.outputs)
@@ -214,34 +218,63 @@ class Transformer(Asset):
         if missing:
             self.set_state(IDLE, f"waiting for inputs: {', '.join(missing)}")
             return
+        blocking = hub.blocking_condition(self.id)
+        if blocking:
+            self.set_state(BLOCKED, f"working condition '{blocking}'")
+            return
         self._start_cycle(r)
 
-    def _start_cycle(self, recipe: Recipe) -> None:
+    def _start_cycle(self, recipe: Recipe, *, reserved_slots: list[list[str]] | None = None,
+                     external: dict | None = None) -> ProductionCycle:
         sim = self.sim
-        speed = self.config["speed_pct"]
-        mult = self.time_multiplier(speed)
-        quality = self.quality_score(speed)
-        duration = recipe.processing_time_s * mult
-        reserved: list[str] = []
-        for i, item in enumerate(recipe.inputs):
-            buf = self.input_buffers[i]
-            for _ in range(item.quantity):
-                reserved.append(buf.popleft())
+        hub = sim.industrial
+        ind = hub.cycle_features(self, recipe)
+        if ind is not None:
+            f = ind["features"]
+            speed, mult, quality = f["speed_pct"], f["time_multiplier"], f["quality_score"]
+            duration, p_defect = f["processing_time_s"], f["defect_probability"]
+        else:
+            speed = self.config["speed_pct"]
+            mult = self.time_multiplier(speed)
+            quality = self.quality_score(speed)
+            duration = recipe.processing_time_s * mult
+            p_defect = defect_probability(quality)
+        if reserved_slots is None:
+            reserved_slots = []
+            for i, item in enumerate(recipe.inputs):
+                buf = self.input_buffers[i]
+                reserved_slots.append([buf.popleft() for _ in range(item.quantity)])
+        else:
+            for i, pids in enumerate(reserved_slots):
+                for pid in pids:
+                    self.input_buffers[i].remove(pid)
+        reserved = [pid for pids in reserved_slots for pid in pids]
         orders: list[str] = []
         for pid in reserved:
             for o in sim.products[pid].production_order_ids:
                 if o not in orders:
                     orders.append(o)
+        if not orders:
+            orders = [sim.default_order_id]
         self.cycle_seq += 1
         lot = f"LOT-{self.id}-{self.cycle_seq:05d}"
         snapshot = {"recipe": recipe.to_dict(), "speed_pct": speed, "time_multiplier": mult,
                     "processing_time_s": duration, "quality_score": quality,
-                    "defect_probability": defect_probability(quality),
+                    "defect_probability": p_defect,
                     "quality_model": dict(self.config["quality_model"]),
                     "speed_model": dict(self.config["speed_model"])}
+        if [len(p) for p in reserved_slots] != [it.quantity for it in recipe.inputs]:
+            snapshot["input_slots"] = [list(p) for p in reserved_slots]
+        if ind is not None:
+            snapshot["industrial"] = ind
         cycle = sim.new_cycle(self, "transformation", lot, orders, snapshot, recipe_id=recipe.id)
         cycle.input_ids = list(reserved)
         cycle.scheduled_end = sim.now + duration
+        if external is not None:
+            cycle.source = "external"
+            cycle.external_cycle_id = external.get("cycle_id")
+            cycle.external_timestamps = {"started": external.get("timestamp")}
+            cycle.exceptions = list(external.get("exceptions") or [])
         self.active_cycle_id = cycle.id
         for pid in reserved:
             p = sim.products[pid]
@@ -249,17 +282,26 @@ class Transformer(Asset):
             self._reservation_entries[pid] = sim.new_history_entry(
                 p, self, start=sim.now, cycle_id=cycle.id,
                 attributes={"role": "input", "recipe_id": recipe.id, "transformer_speed": speed / 100.0})
-        self._completion_event = sim.scheduler.schedule(cycle.scheduled_end, Priority.COMPLETION,
-                                                        "cycle_complete", self.id, cycle.id)
+        if external is None:
+            self._completion_event = sim.scheduler.schedule(cycle.scheduled_end, Priority.COMPLETION,
+                                                            "cycle_complete", self.id, cycle.id)
+        if ind is not None:
+            hub.on_cycle_started(self, cycle)
         self.set_state(PROCESSING, f"cycle {cycle.id}")
+        details = {"scheduled_end": cycle.scheduled_end, "lot_number": lot,
+                   "input_defects": sum(sim.products[p].is_defective for p in reserved)}
+        if ind is not None:
+            details.update(working_conditions=ind["working_conditions"], classification=ind["classification"],
+                           behaviors_applied=ind["applied"])
+        if external is not None:
+            details.update(source="external", external_cycle_id=cycle.external_cycle_id)
         sim.emit("processing_started", self, cycle_id=cycle.id, production_order_ids=orders,
                  input_product_ids=reserved, input_quantity=len(reserved), timestamp_start=sim.now,
                  config={"recipe_id": recipe.id, "speed_pct": speed, "time_multiplier": mult,
                          "config_version": self.config_version},
-                 readings=self._readings(speed),
-                 details={"scheduled_end": cycle.scheduled_end, "lot_number": lot,
-                          "input_defects": sum(sim.products[p].is_defective for p in reserved)})
+                 readings=self._readings(speed), details=details)
         self.wake_inputs()
+        return cycle
 
     def _readings(self, speed: float) -> dict:
         return {"speed_pct": speed, "load_factor": round(speed / 100.0, 4),
@@ -269,13 +311,65 @@ class Transformer(Asset):
         if kind == "cycle_complete" and payload == self.active_cycle_id:
             self._complete_cycle(self.sim.cycles[payload])
 
-    def _complete_cycle(self, cycle: ProductionCycle) -> None:
+    def _input_slots(self, cycle: ProductionCycle, recipe: Recipe) -> list[list[str]]:
+        slots = cycle.config_snapshot.get("input_slots")
+        if slots is not None:
+            return [list(s) for s in slots]
+        out, idx = [], 0
+        for item in recipe.inputs:
+            out.append(cycle.input_ids[idx: idx + item.quantity])
+            idx += item.quantity
+        return out
+
+    def _plan_outputs(self, recipe: Recipe, specs: list[dict] | None, strict: bool) -> tuple[list, list[str]]:
+        """Assign external output specifications to recipe output slots (validated before mutation)."""
+        plan: list[list[dict | None]] = [[None] * it.quantity for it in recipe.outputs]
+        if not specs:
+            return plan, []
+        exceptions: list[str] = []
+        fill = [0] * len(recipe.outputs)
+        for k, spec in enumerate(specs):
+            slot = spec.get("slot")
+            if slot is None and spec.get("product_type_id"):
+                cands = [j for j, it in enumerate(recipe.outputs) if it.product_type_id == spec["product_type_id"]
+                         and fill[j] < it.quantity]
+                slot = cands[0] if cands else None
+            if slot is None:
+                cands = [j for j, it in enumerate(recipe.outputs) if fill[j] < it.quantity]
+                slot = cands[0] if cands and not spec.get("product_type_id") else None
+            if not isinstance(slot, int) or isinstance(slot, bool) or not 0 <= slot < len(recipe.outputs):
+                exceptions.append(f"output #{k} ({spec.get('product_id')}) does not match any recipe output slot")
+                continue
+            item = recipe.outputs[slot]
+            if spec.get("product_type_id") and spec["product_type_id"] != item.product_type_id:
+                exceptions.append(f"output #{k} type '{spec['product_type_id']}' differs from slot {slot} "
+                                  f"type '{item.product_type_id}'")
+                continue
+            if fill[slot] >= item.quantity:
+                exceptions.append(f"output #{k} exceeds the recipe quantity of slot {slot}")
+                continue
+            plan[slot][fill[slot]] = spec
+            fill[slot] += 1
+        for j, it in enumerate(recipe.outputs):
+            if fill[j] < it.quantity:
+                exceptions.append(f"slot {j}: {it.quantity - fill[j]} output(s) not reported; generated by recipe")
+        if strict and exceptions:
+            raise ValidationError("external outputs do not match the recipe: " + "; ".join(exceptions))
+        return plan, exceptions
+
+    def _complete_cycle(self, cycle: ProductionCycle, *, external: dict | None = None) -> list[str]:
         sim = self.sim
+        hub = sim.industrial
         snap = cycle.config_snapshot
         recipe = Recipe.from_dict(snap["recipe"])
+        plan, exceptions = self._plan_outputs(recipe, (external or {}).get("outputs"),
+                                              bool(external and external.get("strict")))
+        if hub.active(self.id):
+            hub.on_cycle_ending(self, cycle)
         quality = snap["quality_score"]
         p_defect = snap["defect_probability"]
         inputs = [sim.products[pid] for pid in cycle.input_ids]
+        input_slots = {pid: i for i, pids in enumerate(self._input_slots(cycle, recipe)) for pid in pids}
         any_defective_input = any(p.is_defective for p in inputs)
         for p in inputs:
             self._reservation_entries.pop(p.id).complete(sim.now, result="consumed")
@@ -283,18 +377,35 @@ class Transformer(Asset):
         outputs: list[str] = []
         defects = 0
         parent_ids = [p.id for p in inputs]
+        features = {k: snap.get(k) for k in ("speed_pct", "time_multiplier", "processing_time_s",
+                                              "quality_score", "defect_probability")}
         for j, item in enumerate(recipe.outputs):
-            for _ in range(item.quantity):
-                if recipe.defect_policy == "any_defective_input" and any_defective_input:
+            pt = sim.product_types.get(item.product_type_id)
+            map_attrs = bool(item.attribute_mappings or (pt is not None and pt.attributes))
+            for u in range(item.quantity):
+                spec = plan[j][u] or {}
+                if isinstance(spec.get("is_defective"), bool):
+                    defective, cause = spec["is_defective"], "external"
+                elif recipe.defect_policy == "any_defective_input" and any_defective_input:
                     defective, cause = True, "defective_input"
                 else:
                     defective = sim.rng.random() < p_defect
                     cause = "machine_quality" if defective else None
                 defects += int(defective)
+                static = {"is_byproduct": item.is_byproduct} if item.is_byproduct else {}
+                provenance = None
+                if map_attrs or spec.get("attributes"):
+                    attrs, provenance = hub.resolve_attributes(
+                        self, product_type_id=item.product_type_id, mappings=item.attribute_mappings, cycle=cycle,
+                        inputs=inputs, input_slots=input_slots, features=features, static=static, slot=j,
+                        is_byproduct=item.is_byproduct, unit_index=u, external=spec.get("attributes"))
+                else:
+                    attrs = static
                 prod = sim.create_product(
                     type_id=item.product_type_id, lot=cycle.lot_number, order_ids=list(cycle.production_order_ids),
                     cycle_id=cycle.id, parent_ids=parent_ids, is_defective=defective,
-                    quality_score=quality, attributes={"is_byproduct": item.is_byproduct} if item.is_byproduct else {},
+                    quality_score=quality, attributes=attrs, attribute_provenance=provenance,
+                    external_id=spec.get("product_id"),
                 )
                 prod.measurements["quality_score"] = quality
                 self.place(prod, "output_buffer", OUT_PORTS[j], ProductStatus.QUEUED)
@@ -308,9 +419,16 @@ class Transformer(Asset):
                                 "input_defect_states": {p.id: p.is_defective for p in inputs},
                                 "readings": self._readings(snap["speed_pct"]),
                                 "config_version": cycle.config_version, "role": "output"})
+                if "industrial" in snap:
+                    entry.attributes["working_conditions"] = snap["industrial"]["working_conditions"]
+                    entry.attributes["classification"] = snap["industrial"]["classification"]
                 entry.complete(sim.now)
                 self.output_buffers[j].append(prod.id)
                 outputs.append(prod.id)
+        if exceptions:
+            cycle.exceptions.extend(exceptions)
+        if external is not None:
+            cycle.external_timestamps["completed"] = external.get("timestamp")
         sim.finish_cycle(cycle, input_ids=cycle.input_ids, output_ids=outputs, defect_count=defects)
         c = self.stats_counters
         c["cycles_completed"] += 1
@@ -320,6 +438,13 @@ class Transformer(Asset):
         c["busy_time_s"] += sim.now - cycle.started_at
         self.active_cycle_id = None
         self._completion_event = None
+        details = {"lot_number": cycle.lot_number, "input_defects": sum(p.is_defective for p in inputs)}
+        if cycle.measurements:
+            details["measurements"] = cycle.measurements
+        if cycle.source == "external":
+            details.update(source="external", external_cycle_id=cycle.external_cycle_id)
+        if cycle.exceptions:
+            details["exceptions"] = list(cycle.exceptions)
         sim.emit("processing_completed", self, cycle_id=cycle.id,
                  production_order_ids=list(cycle.production_order_ids),
                  input_product_ids=list(cycle.input_ids), output_product_ids=outputs,
@@ -328,10 +453,67 @@ class Transformer(Asset):
                  config={"recipe_id": recipe.id, "speed_pct": snap["speed_pct"],
                          "config_version": cycle.config_version},
                  readings={**self._readings(snap["speed_pct"]), "quality_score": quality},
-                 details={"lot_number": cycle.lot_number,
-                          "input_defects": sum(p.is_defective for p in inputs)})
+                 details=details)
         self.set_state(IDLE, "cycle completed")
         self.wake()
+        return outputs
+
+    # ------------------------------------------------------------------ external lifecycle
+    def start_external_cycle(self, *, cycle_id: str | None, input_ids: list[str] | None, strict: bool,
+                             timestamp: Any = None) -> ProductionCycle:
+        """Start a cycle reported by an external system (inputs are validated before any mutation)."""
+        if not self.is_operational():
+            raise ConflictError(f"transformer '{self.id}' is {self.state}")
+        if self.active_cycle_id:
+            raise ConflictError(f"transformer '{self.id}' already runs cycle {self.active_cycle_id}")
+        r = self.recipe
+        if r is None:
+            raise ConflictError(f"transformer '{self.id}' has no recipe")
+        exceptions: list[str] = []
+        if input_ids:
+            slots: list[list[str]] = [[] for _ in r.inputs]
+            for pid in input_ids:
+                slot = next((i for i in range(len(r.inputs)) if pid in self.input_buffers[i]), None)
+                if slot is None or pid in slots[slot]:
+                    exceptions.append(f"input '{pid}' is not waiting in an input buffer of '{self.id}'")
+                    continue
+                slots[slot].append(pid)
+            for i, item in enumerate(r.inputs):
+                if len(slots[i]) != item.quantity:
+                    exceptions.append(f"input slot {i}: {len(slots[i])} reported, recipe requires {item.quantity}")
+        else:
+            slots = []
+            for i, item in enumerate(r.inputs):
+                avail = list(self.input_buffers[i])[: item.quantity]
+                if len(avail) < item.quantity:
+                    exceptions.append(f"input slot {i}: only {len(avail)} of {item.quantity} available")
+                slots.append(avail)
+        if exceptions and strict:
+            raise ValidationError("external cycle start does not match the recipe: " + "; ".join(exceptions))
+        return self._start_cycle(r, reserved_slots=slots,
+                                 external={"cycle_id": cycle_id, "timestamp": timestamp, "exceptions": exceptions})
+
+    def complete_external_cycle(self, cycle: ProductionCycle, *, outputs: list[dict] | None, strict: bool,
+                                timestamp: Any = None) -> list[str]:
+        if cycle.id != self.active_cycle_id:
+            raise ConflictError(f"cycle {cycle.id} is not active on '{self.id}'")
+        return self._complete_cycle(cycle, external={"outputs": outputs, "strict": strict, "timestamp": timestamp})
+
+    def cancel_external_cycle(self, reason: str) -> None:
+        if not self.active_cycle_id:
+            raise ConflictError(f"transformer '{self.id}' has no active cycle")
+        self.on_stop(reason)
+        self.set_state(IDLE, "cycle cancelled")
+        self.sim.request_wake(self.id)
+
+    def on_sync_changed(self) -> None:
+        if not self.sim.industrial.production_external(self.id) and self.active_cycle_id:
+            cyc = self.sim.cycles[self.active_cycle_id]
+            if cyc.source == "external":
+                self.on_stop("synchronisation mode changed to simulation")
+                if self.is_operational():
+                    self.set_state(IDLE, "cycle cancelled")
+        self.sim.request_wake(self.id)
 
     # ------------------------------------------------------------------ cancellation
     def on_stop(self, reason: str) -> None:
@@ -342,11 +524,7 @@ class Transformer(Asset):
         sim.scheduler.cancel(self._completion_event)
         recipe = Recipe.from_dict(cycle.config_snapshot["recipe"])
         # Restore reserved inputs to the front of their buffers in original order.
-        idx = 0
-        per_slot: list[list[str]] = []
-        for item in recipe.inputs:
-            per_slot.append(cycle.input_ids[idx: idx + item.quantity])
-            idx += item.quantity
+        per_slot = self._input_slots(cycle, recipe)
         for i, pids in enumerate(per_slot):
             for pid in reversed(pids):
                 self.input_buffers[i].appendleft(pid)
@@ -356,6 +534,7 @@ class Transformer(Asset):
         cycle.status = "cancelled"
         cycle.ended_at = sim.now
         cycle.end_reason = reason
+        cycle.measurements = sim.industrial.store.cycle_summary(cycle.id)
         self.stats_counters["cycles_cancelled"] += 1
         self.active_cycle_id = None
         self._completion_event = None
@@ -363,7 +542,6 @@ class Transformer(Asset):
                  input_product_ids=list(cycle.input_ids), input_quantity=len(cycle.input_ids),
                  timestamp_start=cycle.started_at, timestamp_end=sim.now, error=reason,
                  details={"inputs_restored": True})
-
     def on_restart(self) -> None:
         if self.recipe is None:
             self.set_state(UNCONFIGURED, "no recipe selected")

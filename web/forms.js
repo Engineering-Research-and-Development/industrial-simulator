@@ -136,9 +136,88 @@ const WIDGETS = {
       const t = WIDGETS.select({ options: (c) => c.types.map((x) => [x.id, x.name === x.id ? x.id : `${x.name} (${x.id})`]) }, it.product_type_id, ctx);
       const q = h("input", { type: "number", min: 1, step: 1, value: it.quantity ?? 1, class: "qty", title: "quantity" });
       const b = f.byproduct ? h("input", { type: "checkbox", checked: !!it.is_byproduct }) : null;
-      return { cells: [h("span", { class: "x" }, q, "×"), t.el, b ? h("label", { class: "check", title: "by-product" }, b, "by-product") : null],
-        get: () => ({ product_type_id: t.get(), quantity: parseInt(q.value, 10), is_byproduct: b ? b.checked : false }) };
+      let maps = null, mapCell = null;
+      if (f.mappings) {
+        maps = WIDGETS.mappings({ typeOf: () => t.get() }, it.attribute_mappings, ctx);
+        const n = (it.attribute_mappings || []).length;
+        mapCell = h("details", { class: "maps" }, h("summary", {}, `attribute mappings${n ? ` (${n})` : ""}`), maps.el);
+      }
+      return { cells: [h("span", { class: "x" }, q, "×"), t.el, b ? h("label", { class: "check", title: "by-product" }, b, "by-product") : null, mapCell],
+        get: () => {
+          const out = { product_type_id: t.get(), quantity: parseInt(q.value, 10), is_byproduct: b ? b.checked : false };
+          if (maps) out.attribute_mappings = maps.get();
+          return out;
+        } };
     }, { min: 1, max: f.max, addLabel: f.addLabel, minRows: 1 });
+  },
+  // product attribute definitions of a product type
+  attrDefs(f, v) {
+    return rowsWidget(v || [], (a = { name: "", type: "number" }) => {
+      const name = h("input", { value: a.name || "", placeholder: "name", class: "k" });
+      const type = h("select", { class: "op" }, ["number", "integer", "boolean", "string", "enum", "json"].map((x) => h("option", { value: x }, x)));
+      type.value = a.type || "number";
+      const unit = h("input", { value: a.unit || "", placeholder: "unit", class: "num" });
+      const def = h("input", { value: showValue(a.default), placeholder: "default", class: "num" });
+      const min = h("input", { value: a.min ?? "", placeholder: "min", class: "num", type: "number", step: "any" });
+      const max = h("input", { value: a.max ?? "", placeholder: "max", class: "num", type: "number", step: "any" });
+      const allowed = h("input", { value: (a.allowed || []).join(", "), placeholder: "allowed: a, b", class: "val" });
+      const req = h("input", { type: "checkbox", checked: !!a.required });
+      const sync = () => {
+        const numeric = ["number", "integer"].includes(type.value);
+        min.style.display = max.style.display = numeric ? "" : "none";
+        allowed.style.display = ["enum", "string"].includes(type.value) ? "" : "none";
+      };
+      type.addEventListener("change", sync); sync();
+      return { cells: [name, type, unit, def, min, max, allowed, h("label", { class: "check", title: "required" }, req, "req")], get: () => {
+        const out = { ...a, name: name.value.trim(), type: type.value, unit: unit.value.trim() };
+        const d = def.value.trim();
+        out.default = d === "" ? null : type.value === "string" || type.value === "enum" ? d : smartParse(d);
+        out.min = min.value === "" ? null : Number(min.value);
+        out.max = max.value === "" ? null : Number(max.value);
+        const al = allowed.value.split(",").map((s) => s.trim()).filter(Boolean);
+        out.allowed = al.length ? al : null;
+        out.required = req.checked;
+        return out;
+      } };
+    }, { addLabel: "+ Add attribute", empty: "no attribute definitions (free-form attributes)" });
+  },
+  // attribute mappings of a producer or a recipe output
+  mappings(f, v, ctx) {
+    const attrNames = [...new Set((ctx.types || []).flatMap((t) => (t.attributes || []).map((a) => a.name)))];
+    ensureDatalist("dl-attr-names", attrNames.map((n) => [n]));
+    ensureDatalist("dl-cycle-fields", MAPPING_CYCLE_FIELDS.map((n) => [n]));
+    return rowsWidget(v || [], (m = { attribute: "", source: "constant", value: "" }) => {
+      const attr = h("input", { value: m.attribute || "", list: "dl-attr-names", placeholder: "attribute", class: "k" });
+      const src = h("select", { class: "op" }, Object.keys(MAPPING_SOURCES).map((x) => h("option", { value: x }, x)));
+      src.value = m.source || "constant";
+      const ref = h("input", { class: "val" });
+      const agg = h("select", { class: "op", title: "aggregation" });
+      const scale = h("input", { type: "number", step: "any", value: m.scale ?? 1, class: "num", title: "scale" });
+      const offset = h("input", { type: "number", step: "any", value: m.offset ?? 0, class: "num", title: "offset" });
+      const miss = h("select", { class: "op", title: "when the value is missing" }, ["default", "skip", "null"].map((x) => h("option", { value: x }, `missing→${x}`)));
+      miss.value = m.on_missing || "default";
+      const initial = m.source === "constant" ? showValue(m.value) : m.source === "expression" ? m.expression || "" : m.ref || "";
+      ref.value = initial;
+      const sync = () => {
+        const s = MAPPING_SOURCES[src.value];
+        ref.placeholder = s.placeholder;
+        ref.setAttribute("list", src.value === "cycle" ? "dl-cycle-fields" : "");
+        agg.replaceChildren(...(s.aggs || []).map((x) => h("option", { value: x }, x)));
+        agg.style.display = s.aggs ? "" : "none";
+        if (s.aggs) agg.value = s.aggs.includes(m.aggregation) ? m.aggregation : s.aggs[0];
+      };
+      src.addEventListener("change", sync); sync();
+      return { cells: [attr, src, ref, agg, h("span", { class: "x", title: "value × scale + offset" }, "×", scale, "+", offset), miss], get: () => {
+        const out = { attribute: attr.value.trim(), source: src.value, scale: Number(scale.value || 1),
+          offset: Number(offset.value || 0), on_missing: miss.value };
+        for (const k of ["when", "default", "label", "input_slot", "input_product_type_id", "weight_attribute"]) if (m[k] !== undefined) out[k] = m[k];
+        if (src.value === "constant") out.value = smartParse(ref.value);
+        else if (src.value === "expression") out.expression = ref.value.trim();
+        else out.ref = ref.value.trim();
+        if (MAPPING_SOURCES[src.value].aggs) out.aggregation = agg.value;
+        return out;
+      } };
+    }, { addLabel: "+ Add mapping", empty: "no mappings" });
   },
   speedPoints(f, v) {
     return rowsWidget(v || [], (p = [50, 1]) => {
@@ -153,6 +232,19 @@ const WIDGETS = {
   },
 };
 const OPERATOR_LABELS = { eq: "=", ne: "≠", lt: "<", le: "≤", gt: ">", ge: "≥", in: "in", not_in: "not in", exists: "exists" };
+const MAPPING_SOURCES = {
+  constant: { placeholder: "value" },
+  parameter: { placeholder: "parameter name" },
+  measurement: { placeholder: "sensor / composite id", aggs: ["final", "initial", "avg", "min", "max", "latest", "count", "range"] },
+  feature: { placeholder: "feature (speed_pct, processing_time_s…)" },
+  input: { placeholder: "input attribute", aggs: ["first", "last", "avg", "min", "max", "sum", "count", "any", "all", "concat", "unique", "majority"] },
+  expression: { placeholder: "e.g. sensor.temp * 1.8 + 32" },
+  order: { placeholder: "order attribute" },
+  cycle: { placeholder: "cycle field (lot_number…)" },
+  condition: { placeholder: "condition id (true while active)" },
+};
+const MAPPING_CYCLE_FIELDS = ["cycle_id", "lot_number", "started_at", "ended_at", "duration_s", "asset_id", "asset_name",
+  "recipe_id", "source", "external_cycle_id"];
 
 function rowsWidget(items, makeRow, { max = Infinity, min = 0, addLabel = "+ Add", collect, empty, minRows = 0 } = {}) {
   const list = h("div", { class: "rows" });
@@ -182,7 +274,7 @@ function rowsWidget(items, makeRow, { max = Infinity, min = 0, addLabel = "+ Add
 
 // fields: [{key, label, type, help, showIf(values)} | {section, collapsed, fields} | {row: label, fields}]
 const SECTION_OPEN = {};   // remembers expanded sections across inspector re-renders
-const STACKED_TYPES = new Set(["object", "conditions", "kv", "recipeItems", "speedPoints", "typeSet"]);
+const STACKED_TYPES = new Set(["object", "conditions", "kv", "recipeItems", "speedPoints", "typeSet", "attrDefs", "mappings"]);
 function buildForm(fields, value, ctx, preview) {
   const el = h("div", { class: "form" });
   const getters = [];
@@ -271,6 +363,8 @@ const ASSET_SCHEMAS = {
     { key: "defect_probability", label: "Defect rate", type: "percent" },
     { key: "production_order_id", label: "Production order", type: "select", options: (c) => c.orders.map((o) => [o.id, o.name === o.id ? o.id : `${o.name} (${o.id})`]) },
     { key: "attributes", label: "Product attributes", type: "kv", help: "Stamped on every product (usable by splitter rules and sink criteria)" },
+    { section: "Attribute mappings", collapsed: true, fields: [
+      { key: "attribute_mappings", label: "", type: "mappings", help: "Computed per batch from parameters, sensors, features, cycle metadata or expressions; provenance is recorded on each product" }] },
     { section: "Advanced", collapsed: true, fields: [
       { key: "max_pending_batches", label: "Output buffer", type: "number", int: true, min: 1, suffix: "batches", help: "Producer blocks when this many batches wait for the output conveyor" },
       { key: "start_delay_s", label: "Start delay", type: "number", min: 0, suffix: "s" },
@@ -320,7 +414,7 @@ const ASSET_SCHEMAS = {
 
 const ASSET_DEFAULTS = {
   producer: (c) => ({ product_type_id: c.types[0]?.id, batch_quantity: 1, interval: 10, interval_unit: "seconds",
-    max_pending_batches: 1, production_order_id: c.orders[0]?.id, defect_probability: 0, start_delay_s: 0, attributes: {}, initial_state: "running" }),
+    max_pending_batches: 1, production_order_id: c.orders[0]?.id, defect_probability: 0, start_delay_s: 0, attributes: {}, attribute_mappings: [], initial_state: "running" }),
   transformer: (c) => ({ recipe_id: c.recipes[0]?.id ?? null, speed_pct: 50, input_buffer_multiplier: 2, output_buffer_multiplier: 2,
     speed_model: { points: [[1, 2], [50, 1], [100, 0.5]] }, quality_model: { q_at_1: 1, q_at_50: 0.999, q_at_100: 0.99, steepness: 10 }, initial_state: "running" }),
   splitter: () => ({ mode: "percentage", percentage_a: 50, rules: [], fallback_branch: "B", buffer_capacity: 1, initial_state: "running" }),
@@ -353,12 +447,14 @@ const CATALOG = {
     { key: "name", label: "Name", type: "text", placeholder: "e.g. Steel plate" },
     { key: "id", label: "ID", type: "text", readonly: editing, placeholder: "auto from name", help: editing ? "IDs are immutable" : "Letters, digits, - and _" },
     { key: "description", label: "Description", type: "text", multiline: true },
+    { key: "attributes", label: "Attribute definitions", type: "attrDefs", help: "Typed attributes (unit, default, range) that producer and recipe mappings fill in" },
     { key: "metadata", label: "Metadata", type: "kv" }] },
   recipe: { title: "recipe", path: "/api/recipes", fields: (editing) => [
     { key: "name", label: "Name", type: "text", placeholder: "e.g. Smelt iron" },
     { key: "id", label: "ID", type: "text", readonly: editing, placeholder: "auto from name", help: editing ? "IDs are immutable" : null },
     { key: "inputs", label: "Consumes", type: "recipeItems", max: 5, addLabel: "+ Add input", help: "Up to 5 inputs (one input port each)" },
-    { key: "outputs", label: "Produces", type: "recipeItems", max: 3, byproduct: true, addLabel: "+ Add output", help: "Up to 3 outputs (one output port each)" },
+    { key: "outputs", label: "Produces", type: "recipeItems", max: 3, byproduct: true, mappings: true, addLabel: "+ Add output",
+      help: "Up to 3 outputs (one output port each). Each output (main product or by-product) has its own attribute mappings" },
     { key: "processing_time_s", label: "Processing time", type: "number", min: 0, suffix: "s (base, × speed factor)" },
     { key: "defect_policy", label: "Defects", type: "select", options: [["any_defective_input", "Cascade: defective if any input is defective"],
       ["independent", "Machine quality only (ignore input defects)"]] },

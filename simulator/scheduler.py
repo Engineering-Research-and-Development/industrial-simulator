@@ -21,6 +21,7 @@ class Priority:
     COMPLETION = 10      # transformer cycle completions
     ARRIVAL = 20         # conveyor arrivals
     PRODUCER_TICK = 30   # producer batch generation
+    SAMPLE = 35          # simulated sensor sampling and working-condition evaluation
     WAKE = 40            # asset re-evaluation (try to push / pull / start cycles)
 
 

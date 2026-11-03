@@ -8,20 +8,27 @@ translates engine errors into HTTP status codes.
 from __future__ import annotations
 
 import itertools
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 from fastapi import Body, FastAPI, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from .controller import SimulationController
 from .engine import Simulation
-from .errors import NotFoundError, SimulatorError, ValidationError
+from .errors import ConflictError, NotFoundError, SimulatorError, ValidationError
+from .industrial.asset_types import TYPE_KINDS
+from .industrial.datasets import DATASETS
+from .industrial.ingestion import ingest
+from .industrial.mqtt import MqttIngestor
+from .industrial.units import known_units
 from .integration import IntegrationBridge, create_publisher
 from .scenario import (export_scenario, list_builtin_scenarios, list_checkpoints, load_checkpoint, load_scenario,
-                       read_builtin_scenario, save_checkpoint)
+                       new_scenario, read_builtin_scenario, rename_scenario_file, save_checkpoint, scenario_exists,
+                       write_scenario)
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
@@ -30,18 +37,34 @@ class SimulationService:
     """Owns the controller, the active simulation and the optional broker bridge."""
 
     def __init__(self, sim: Simulation | None = None, *, checkpoint_dir: Path | None = None,
-                 background: bool = True) -> None:
+                 background: bool = True, mqtt_client_factory=None, scenario_dir: Path | None = None,
+                 scenario_id: str | None = None) -> None:
         self.controller = SimulationController(sim or Simulation(seed=42))
+        self.sim.industrial.ensure_default_types()
         self.bridge: IntegrationBridge | None = None
         self.checkpoint_dir = checkpoint_dir
+        self.scenario_dir = scenario_dir
+        self.scenario_id = scenario_id  # scenario file backing the current plant (None = unsaved)
         self.background = background
         self._metric_seq = itertools.count(1)
         self._last_metrics_wall = 0.0
         self.controller.on_tick.append(self._publish_metrics)
+        self.mqtt = MqttIngestor(self.controller.lock, lambda: self.sim, client_factory=mqtt_client_factory,
+                                 before_ingest=self.sync_clock)
 
     @property
     def sim(self) -> Simulation:
         return self.controller.sim
+
+    def sync_clock(self) -> None:
+        """Advance a running simulation to the current wall-clock target before applying external events."""
+        if self.controller.status == "running":
+            self.controller.tick()
+
+    def ingest(self, envelope: Any, transport: str = "rest") -> dict:
+        with self.controller.lock:
+            self.sync_clock()
+            return ingest(self.sim, envelope, transport=transport)
 
     def _publish_metrics(self) -> None:
         if self.bridge is None:
@@ -57,6 +80,8 @@ class SimulationService:
                 self.sim.listeners.remove(self.bridge)
             sim.listeners.append(self.bridge)
         self.controller.replace_simulation(sim, status)
+        with self.controller.lock:
+            sim.industrial.ensure_default_types()
 
     def enable_integration(self, adapter: str, options: dict | None, topic_prefix: str,
                            categories: list[str] | None) -> dict:
@@ -78,6 +103,7 @@ class SimulationService:
     def shutdown(self) -> None:
         self.controller.stop_background()
         self.disable_integration()
+        self.mqtt.stop()
 
 
 def _int(value: Any, name: str) -> int:
@@ -85,6 +111,13 @@ def _int(value: Any, name: str) -> int:
         return int(value)
     except (TypeError, ValueError):
         raise ValidationError(f"'{name}' must be an integer") from None
+
+
+def slug_id(name: Any) -> str:
+    if not isinstance(name, str) or not name.strip():
+        raise ValidationError("scenario name must be a non-empty string")
+    s = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")[:64]
+    return s or "scenario"
 
 
 def create_app(service: SimulationService | None = None) -> FastAPI:
@@ -253,20 +286,32 @@ def create_app(service: SimulationService | None = None) -> FastAPI:
     def create_asset(payload: Any = Body(...)):
         d = body_dict(payload)
         with lock:
-            if d.get("kind") == "conveyor":
-                a = svc.sim.add_conveyor(d.get("name", ""), d.get("source"), d.get("target"), d.get("config") or {},
-                                         asset_id=d.get("id"), position=d.get("position"))
-            else:
-                a = svc.sim.add_asset(d.get("kind"), d.get("name", ""), d.get("config") or {},
-                                      asset_id=d.get("id"), position=d.get("position"))
-            return a.snapshot()
+            return create_typed_asset(d.get("kind"), d.get("name", ""), d).snapshot()
 
     @app.post("/api/connections", status_code=201)
     def connect(payload: Any = Body(...)):
         d = body_dict(payload)
         with lock:
-            return svc.sim.add_conveyor(d.get("name") or "Conveyor", d.get("source"), d.get("target"),
-                                        d.get("config") or {}, asset_id=d.get("id")).snapshot()
+            return create_typed_asset("conveyor", d.get("name") or "Conveyor", {**d, "position": None}).snapshot()
+
+    def create_typed_asset(kind: Any, name: str, d: dict):
+        """Create an asset bound to ``type_id`` – by default the per-kind default asset type.
+
+        ``"type_id": null`` creates an unbound asset. Instance config overrides the type template."""
+        hub = svc.sim.industrial
+        type_id = d.get("type_id", hub.default_type_id(kind) if isinstance(kind, str) else None)
+        if type_id is None or kind not in TYPE_KINDS:
+            if kind == "conveyor":
+                return svc.sim.add_conveyor(name, d.get("source"), d.get("target"), d.get("config") or {},
+                                            asset_id=d.get("id"), position=d.get("position"))
+            return svc.sim.add_asset(kind, name, d.get("config") or {}, asset_id=d.get("id"), position=d.get("position"))
+        if type_id == hub.default_type_id(kind):
+            hub.ensure_default_types()
+        t = hub.get_type(type_id)
+        if t.kind != kind:
+            raise ValidationError(f"asset type '{type_id}' is for {t.kind}s, not {kind}s")
+        return hub.deploy(type_id, name, config=d.get("config") or {}, asset_id=d.get("id"),
+                          position=d.get("position"), source=d.get("source"), target=d.get("target"))
 
     @app.get("/api/assets/{asset_id}")
     def get_asset(asset_id: str):
@@ -388,17 +433,84 @@ def create_app(service: SimulationService | None = None) -> FastAPI:
         with lock:
             sim = load_scenario(body_dict(payload))
             svc.install_simulation(sim, "idle")
+            svc.scenario_id = None
             return {"ok": True, "name": sim.name, "assets": len(sim.assets)}
 
     @app.get("/api/scenarios")
     def scenarios():
-        return list_builtin_scenarios()
+        return list_builtin_scenarios(svc.scenario_dir)
+
+    def current_info() -> dict:
+        return {"id": svc.scenario_id, "name": svc.sim.name, "description": getattr(svc.sim, "description", ""),
+                "saved": svc.scenario_id is not None and scenario_exists(svc.scenario_id, svc.scenario_dir)}
+
+    @app.get("/api/scenarios/current")
+    def scenario_current():
+        with lock:
+            return current_info()
+
+    @app.post("/api/scenarios", status_code=201)
+    def scenario_create(payload: Any = Body(...)):
+        """New empty plant: keeps the catalogues (product types, recipes, orders, asset types), writes a new file."""
+        d = body_dict(payload)
+        name = d.get("name")
+        sid = d.get("id") or slug_id(name)
+        seed = d.get("seed")
+        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+            raise ValidationError("seed must be an integer or null")
+        with lock:
+            if scenario_exists(sid, svc.scenario_dir):
+                raise ConflictError(f"scenario '{sid}' already exists")
+            sim = new_scenario(svc.sim, name=name, description=d.get("description", ""), seed=seed,
+                               keep_catalog=bool(d.get("keep_catalog", True)),
+                               keep_asset_types=bool(d.get("keep_asset_types", True)))
+            write_scenario(export_scenario(sim), sid, svc.scenario_dir, overwrite=False)
+            svc.install_simulation(sim, "idle")
+            svc.scenario_id = sid
+            return current_info()
+
+    @app.put("/api/scenarios/{scenario_id}")
+    def scenario_save(scenario_id: str, payload: Any = Body(None), overwrite: bool = False):
+        """Save the current plant to ``scenario_id`` (Save when it is the current file, Save As otherwise)."""
+        d = body_dict(payload) if payload is not None else {}
+        with lock:
+            if scenario_id != svc.scenario_id and scenario_exists(scenario_id, svc.scenario_dir) and not overwrite:
+                raise ConflictError(f"scenario '{scenario_id}' already exists (use overwrite=true)")
+            if d.get("name") is not None:
+                if not isinstance(d["name"], str) or not d["name"].strip():
+                    raise ValidationError("scenario name must be a non-empty string")
+                svc.sim.name = d["name"].strip()
+            if d.get("description") is not None:
+                svc.sim.description = str(d["description"])
+            write_scenario(export_scenario(svc.sim), scenario_id, svc.scenario_dir)
+            svc.scenario_id = scenario_id
+            return current_info()
+
+    @app.post("/api/scenarios/{scenario_id}/rename")
+    def scenario_rename(scenario_id: str, payload: Any = Body(...)):
+        """Rename a scenario file (``new_id``) and/or its display name (``name``)."""
+        d = body_dict(payload)
+        new_id, name = d.get("new_id") or scenario_id, d.get("name")
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            raise ValidationError("scenario name must be a non-empty string")
+        with lock:
+            doc = read_builtin_scenario(scenario_id, svc.scenario_dir)
+            rename_scenario_file(scenario_id, new_id, svc.scenario_dir)
+            if name is not None:
+                doc["name"] = name.strip()
+                write_scenario(doc, new_id, svc.scenario_dir)
+            if svc.scenario_id == scenario_id:
+                svc.scenario_id = new_id
+                if name is not None:
+                    svc.sim.name = name.strip()
+            return {"id": new_id, "name": doc.get("name", new_id), "current": current_info()}
 
     @app.post("/api/scenarios/{scenario_id}/load")
     def load_builtin(scenario_id: str):
         with lock:
-            sim = load_scenario(read_builtin_scenario(scenario_id))
+            sim = load_scenario(read_builtin_scenario(scenario_id, svc.scenario_dir))
             svc.install_simulation(sim, "idle")
+            svc.scenario_id = scenario_id
             return {"ok": True, "name": sim.name, "assets": len(sim.assets)}
 
     @app.get("/api/checkpoints")
@@ -443,6 +555,254 @@ def create_app(service: SimulationService | None = None) -> FastAPI:
         if bridge is None or not hasattr(bridge.publisher, "decoded"):
             raise ValidationError("message inspection is only available for the in-memory adapter")
         return bridge.publisher.decoded()[-limit:]  # type: ignore[attr-defined]
+
+    # ------------------------------------------------------------------ asset types
+    def hub():
+        return svc.sim.industrial
+
+    @app.get("/api/asset-types")
+    def asset_types():
+        with lock:
+            h = hub()
+            return [h.type_summary(t) for t in h.asset_types.values()]
+
+    @app.post("/api/asset-types", status_code=201)
+    def asset_type_create(payload: Any = Body(...)):
+        with lock:
+            h = hub()
+            return h.type_summary(h.create_type(body_dict(payload)))
+
+    @app.get("/api/asset-types/{type_id}")
+    def asset_type_get(type_id: str):
+        with lock:
+            h = hub()
+            return h.type_summary(h.get_type(type_id))
+
+    @app.put("/api/asset-types/{type_id}")
+    def asset_type_update(type_id: str, payload: Any = Body(...)):
+        with lock:
+            h = hub()
+            return h.type_summary(h.update_type(type_id, body_dict(payload)))
+
+    @app.delete("/api/asset-types/{type_id}", status_code=204)
+    def asset_type_delete(type_id: str):
+        with lock:
+            hub().delete_type(type_id)
+
+    @app.post("/api/asset-types/{type_id}/duplicate", status_code=201)
+    def asset_type_duplicate(type_id: str, payload: Any = Body(...)):
+        d = body_dict(payload)
+        with lock:
+            h = hub()
+            return h.type_summary(h.duplicate_type(type_id, d.get("id"), d.get("name")))
+
+    @app.post("/api/asset-types/{type_id}/deploy", status_code=201)
+    def asset_type_deploy(type_id: str, payload: Any = Body(...)):
+        d = body_dict(payload)
+        with lock:
+            a = hub().deploy(type_id, d.get("name", ""), config=d.get("config"), asset_id=d.get("id"),
+                             position=d.get("position"), overrides=d.get("overrides"), local=d.get("local"),
+                             source=d.get("source"), target=d.get("target"))
+            return {**a.snapshot(), "industrial": hub().describe(a.id)}
+
+    @app.post("/api/asset-types/{type_id}/sync")
+    def asset_type_sync(type_id: str, dry_run: bool = False):
+        with lock:
+            return hub().sync_type_instances(type_id, dry_run=dry_run)
+
+    # ------------------------------------------------------------------ per-asset industrial profile
+    @app.get("/api/assets/{asset_id}/industrial")
+    def asset_industrial(asset_id: str):
+        with lock:
+            return hub().describe(asset_id)
+
+    @app.put("/api/assets/{asset_id}/parameters")
+    def asset_parameters(asset_id: str, payload: Any = Body(...)):
+        with lock:
+            return hub().set_parameters(asset_id, body_dict(payload))
+
+    @app.put("/api/assets/{asset_id}/overrides/{section}/{key}")
+    def asset_override_set(asset_id: str, section: str, key: str, payload: Any = Body(...)):
+        with lock:
+            return hub().set_item_override(asset_id, section, key, body_dict(payload))
+
+    @app.delete("/api/assets/{asset_id}/overrides/{section}/{key}")
+    def asset_override_reset(asset_id: str, section: str, key: str):
+        with lock:
+            return hub().reset_override(asset_id, section, key)
+
+    @app.put("/api/assets/{asset_id}/local")
+    def asset_local(asset_id: str, payload: Any = Body(...)):
+        with lock:
+            return hub().set_local(asset_id, body_dict(payload))
+
+    @app.post("/api/assets/{asset_id}/bind")
+    def asset_bind(asset_id: str, payload: Any = Body(...)):
+        d = body_dict(payload)
+        with lock:
+            return hub().attach_type(asset_id, d.get("type_id"), apply_config=bool(d.get("apply_config", True)))
+
+    @app.post("/api/assets/{asset_id}/unbind")
+    def asset_unbind(asset_id: str):
+        with lock:
+            return hub().detach_type(asset_id)
+
+    @app.post("/api/assets/{asset_id}/sync-type")
+    def asset_sync_type(asset_id: str, dry_run: bool = False):
+        with lock:
+            return hub().sync_instance(asset_id, dry_run=dry_run)
+
+    @app.get("/api/assets/{asset_id}/sync")
+    def asset_sync_get(asset_id: str):
+        with lock:
+            svc.sim.get_asset(asset_id)
+            return hub().sync_config(asset_id)
+
+    @app.put("/api/assets/{asset_id}/sync")
+    def asset_sync_set(asset_id: str, payload: Any = Body(...)):
+        with lock:
+            return hub().set_sync(asset_id, body_dict(payload))
+
+    @app.get("/api/assets/{asset_id}/measurements")
+    def asset_measurements(asset_id: str, measurement_id: str | None = None, since_seq: int | None = None,
+                           since_time: float | None = None, cycle_id: str | None = None,
+                           limit: int = Query(500, ge=1, le=20_000)):
+        with lock:
+            svc.sim.get_asset(asset_id)
+            store = hub().store
+            return {"latest": {m: o.to_dict() for m, o in store.latest_for(asset_id).items()},
+                    "observations": [o.to_dict() for o in store.query(
+                        asset_id=asset_id, measurement_id=measurement_id, since_seq=since_seq,
+                        since_time=since_time, cycle_id=cycle_id, limit=limit)]}
+
+    @app.get("/api/assets/{asset_id}/conditions")
+    def asset_conditions(asset_id: str, limit: int = Query(200, ge=1, le=10_000)):
+        with lock:
+            svc.sim.get_asset(asset_id)
+            h = hub()
+            return {"active": h.active_conditions(asset_id), "classification": h.classification(asset_id),
+                    "blocking": h.blocking_condition(asset_id), "log": h.condition_log(asset_id=asset_id, limit=limit)}
+
+    @app.get("/api/conditions/log")
+    def conditions_log(limit: int = Query(200, ge=1, le=10_000)):
+        with lock:
+            return hub().condition_log(limit=limit)
+
+    @app.post("/api/expressions/validate")
+    def expression_validate(payload: Any = Body(...)):
+        d = body_dict(payload)
+        with lock:
+            return hub().check_expression(d.get("expression"), asset_id=d.get("asset_id"),
+                                          type_id=d.get("type_id"), kind=d.get("kind"))
+
+    @app.get("/api/units")
+    def units():
+        return known_units()
+
+    # ------------------------------------------------------------------ external ingestion
+    @app.post("/api/ingestion/events")
+    def ingestion_events(payload: Any = Body(...)):
+        if isinstance(payload, list):
+            if len(payload) > 1000:
+                raise ValidationError("at most 1000 envelopes per request")
+            return {"results": [svc.ingest(e) for e in payload]}
+        return svc.ingest(payload)
+
+    @app.get("/api/ingestion/status")
+    def ingestion_status():
+        with lock:
+            return {**hub().ingestion.status(), "mqtt": svc.mqtt.info()}
+
+    @app.get("/api/ingestion/messages")
+    def ingestion_messages(limit: int = Query(100, ge=1, le=500), status: str | None = None):
+        with lock:
+            msgs = [m for m in hub().ingestion.messages if status is None or m.get("status") == status]
+            return msgs[-limit:]
+
+    @app.get("/api/ingestion/mqtt")
+    def mqtt_info():
+        return svc.mqtt.info()
+
+    @app.put("/api/ingestion/mqtt")
+    def mqtt_configure(payload: Any = Body(...)):
+        svc.mqtt.configure(body_dict(payload))
+        return svc.mqtt.info()
+
+    @app.post("/api/ingestion/mqtt/start")
+    def mqtt_start():
+        return svc.mqtt.start()
+
+    @app.post("/api/ingestion/mqtt/stop")
+    def mqtt_stop():
+        svc.mqtt.stop()
+        return svc.mqtt.info()
+
+    # ------------------------------------------------------------------ datasets
+    def ds():
+        return svc.sim.datasets
+
+    def _dataset_name(name: str) -> str:
+        if name not in DATASETS:
+            raise ValidationError(f"dataset must be one of {list(DATASETS)}")
+        return name
+
+    @app.get("/api/datasets")
+    def datasets_summary():
+        with lock:
+            return ds().summary()
+
+    @app.post("/api/datasets/sessions", status_code=201)
+    def dataset_create(payload: Any = Body(...)):
+        with lock:
+            return ds().create_session(body_dict(payload)).summary()
+
+    @app.get("/api/datasets/sessions/{sid}")
+    def dataset_get(sid: str):
+        with lock:
+            return ds().get(sid).summary()
+
+    @app.put("/api/datasets/sessions/{sid}")
+    def dataset_update(sid: str, payload: Any = Body(...)):
+        with lock:
+            return ds().update_session(sid, body_dict(payload)).summary()
+
+    @app.delete("/api/datasets/sessions/{sid}", status_code=204)
+    def dataset_delete(sid: str):
+        with lock:
+            ds().delete_session(sid)
+
+    @app.post("/api/datasets/sessions/{sid}/{action}")
+    def dataset_action(sid: str, action: str):
+        if action not in ("start", "pause", "resume", "stop", "clear"):
+            raise NotFoundError(f"unknown session action '{action}'")
+        with lock:
+            svc.sync_clock()
+            return getattr(ds(), action)(sid).summary()
+
+    @app.get("/api/datasets/sessions/{sid}/preview/{dataset}")
+    def dataset_preview(sid: str, dataset: str, limit: int = Query(50, ge=0, le=1000)):
+        with lock:
+            return ds().preview(sid, _dataset_name(dataset), limit)
+
+    @app.get("/api/datasets/sessions/{sid}/export/{dataset}")
+    def dataset_export(sid: str, dataset: str, format: str | None = None):
+        with lock:
+            data, name, mime = ds().export(sid, _dataset_name(dataset), format)
+        return Response(content=data, media_type=mime,
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    @app.get("/api/datasets/sessions/{sid}/manifest")
+    def dataset_manifest(sid: str):
+        with lock:
+            return ds().manifest(sid, list(ds().get(sid).config["datasets"]))
+
+    @app.get("/api/datasets/sessions/{sid}/bundle")
+    def dataset_bundle(sid: str, datasets: str | None = None, format: str | None = None):
+        names = [d.strip() for d in datasets.split(",") if d.strip()] if datasets else None
+        with lock:
+            data, name = ds().bundle(sid, names, format)
+        return Response(content=data, media_type="application/zip",
+                        headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
     # ------------------------------------------------------------------ UI
     if WEB_DIR.is_dir():
