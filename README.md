@@ -1,6 +1,6 @@
-# Industrial Digital Twin Simulator (MVP)
+# Industrial Plant Simulator
 
-A 2D, *Satisfactory*-style production-line simulator built for digital-twin, traceability and
+A 2D, *[Satisfactory](https://it.wikipedia.org/wiki/Satisfactory)*-style production-line simulator built for digital-twins, traceability and
 integration experiments. You can draw a network of **producers → conveyors → transformers
 (recipes) → splitters → sinks**, run it in real time or accelerated, change machine configuration
 while it runs, and trace every product through its **Digital Product Passport (DPP)**.
